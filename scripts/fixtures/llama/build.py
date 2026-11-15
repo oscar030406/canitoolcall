@@ -556,15 +556,20 @@ def build_recorded(l33: Loaded, l4: Loaded) -> list[dict[str, Any]]:
             raw_output=raw,
             output_token_ids=cut_ids,
             tokenizer=l4.tokenizer_pin,
-            expected_error={
-                "reason": "The pythonic call list is cut before its final string, call and list close.",
-                "accept": ["no_tool_calls", "content_passthrough", "exception"],
+            # The first call is closed by its own ')', so it is complete even though the list never closes
+            # (docs/formats/recovery.md section 2). Only the unfinished second call is dropped.
+            expected={
+                "content": None,
+                "reasoning_content": None,
+                "tool_calls": [{"name": "get_weather", "arguments": {"city": "San Francisco"}}],
             },
-            tags=["truncated", "malformed", "x-llama-pythonic", "x-derived-truncation"],
+            tags=["truncated", "malformed", "parallel-calls", "x-llama-pythonic", "x-derived-truncation"],
             notes="Derived, not quoted: the token prefix of llama/l4-meta-pythonic-parallel (a spec_example) without "
             "its last token (which carries the closing "
             "quote, parenthesis and bracket): the 'missing bracket' failure mode reported in "
-            "https://github.com/vllm-project/vllm/issues/30722.",
+            "https://github.com/vllm-project/vllm/issues/30722. The first call is closed by its own ')', so under "
+            "docs/formats/recovery.md section 2 it is complete and must be kept; the unfinished second call must "
+            "not be returned. Returning no calls, or the whole text as content, is fail.",
         ).to_dict()
     )
     return out
