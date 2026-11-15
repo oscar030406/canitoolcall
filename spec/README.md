@@ -33,7 +33,7 @@ The family slug is the directory name, the `family` field, and the prefix of eve
 | `id` | yes | `<family>/<kebab-name>`, globally unique |
 | `family` | yes | family slug |
 | `models` | yes | HF repo ids that emit exactly this format. `models[0]` is the reference model for tokenizer and template |
-| `spec_version` | yes | `"0.1"` |
+| `spec_version` | yes | `"0.2"` (readers accept any `0.x`) |
 | `provenance` | yes | `{kind, source_url, revision, license, generator?, template_sha256?, attribution?}` (see below) |
 | `tools` | yes | the tools offered, in OpenAI function format |
 | `raw_output` | yes | the **exact** completion: after the generation prompt, before the stop token, with special tokens written literally |
@@ -185,3 +185,8 @@ Strict equality gives `pass`. Soft-only equality gives `soft_pass`, which the ma
 ## Versioning
 
 `spec_version` follows `MAJOR.MINOR`. Adding optional fields or tags is a minor bump. Changing required fields or semantics is a major bump. Harnesses must reject fixtures with an unknown major version.
+
+| Version | Change |
+|---|---|
+| 0.2 | Optional `assumes` and `finish` fields ([#9](https://github.com/redd34/canitoolcall/issues/9)). A 0.1 fixture is a valid 0.2 fixture. |
+| 0.1 | First published version. |

@@ -719,7 +719,7 @@ def family_json(lds: dict[str, Loaded]) -> dict[str, Any]:
     return {
         "slug": SLUG,
         "name": "GLM (4.5, 4.6, 4.7, 5.x)",
-        "spec_version": "0.1",
+        "spec_version": "0.2",
         "has_reasoning": True,
         "markers": MARKERS,
         "reference_models": refs,

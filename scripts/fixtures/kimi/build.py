@@ -699,7 +699,7 @@ def family_json(lds: dict[str, Loaded]) -> dict[str, Any]:
     return {
         "slug": SLUG,
         "name": "Kimi (K2.x section tokens, K3 XTML)",
-        "spec_version": "0.1",
+        "spec_version": "0.2",
         "has_reasoning": True,
         "markers": MARKERS,
         "reference_models": refs,

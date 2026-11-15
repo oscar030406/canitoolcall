@@ -672,7 +672,7 @@ def base_record(
         "id": f"{SLUG}/{fid}",
         "family": SLUG,
         "models": [REPO, *SIBLINGS],
-        "spec_version": "0.1",
+        "spec_version": "0.2",
         "provenance": provenance,
         "tools": offered,
         "raw_output": raw,
@@ -730,7 +730,7 @@ def family_json(r: Renderer) -> dict[str, Any]:
     return {
         "slug": SLUG,
         "name": "Gemma 4 (<|tool_call>call:NAME{...} object notation)",
-        "spec_version": "0.1",
+        "spec_version": "0.2",
         "has_reasoning": True,
         "markers": [
             "<|tool_call>",

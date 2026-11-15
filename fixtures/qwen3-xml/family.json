@@ -1,7 +1,7 @@
 {
   "slug": "qwen3-xml",
   "name": "Qwen XML tool calls (Qwen3-Coder, Qwen3.5/3.6/3.8)",
-  "spec_version": "0.1",
+  "spec_version": "0.2",
   "has_reasoning": true,
   "markers": [
     "<tool_call>",
