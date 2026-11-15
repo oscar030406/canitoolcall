@@ -36,7 +36,7 @@ uv run python scripts/engines/prefetch_hf.py   # tokenizer/template files only, 
 
 ## Ask the matrix over MCP
 
-`pip install 'canitoolcall[mcp]'` adds a stdio MCP server: `uvx --from 'canitoolcall[mcp]' canitoolcall mcp [--matrix PATH_OR_URL] [--allow-api-key-env VAR]`. Tools: `lookup`, `list_families`, `list_engines`, `probe`. Claude Code: `claude mcp add canitoolcall -- uvx --from 'canitoolcall[mcp]' canitoolcall mcp`; generic clients use `{"mcpServers": {"canitoolcall": {"command": "uvx", "args": ["--from", "canitoolcall[mcp]", "canitoolcall", "mcp"]}}}`. `probe` sends requests to the endpoint you pass, so use it only for a server the person you work for named. Details are in the README FAQ.
+`pip install 'canitoolcall[mcp]'` adds a stdio MCP server: `uvx --from 'canitoolcall[mcp]' canitoolcall mcp [--matrix PATH_OR_URL] [--allow-base-url URL] [--allow-api-key-env VAR=URL]`. Tools: `lookup`, `list_families`, `list_engines`, `probe`. Claude Code: `claude mcp add canitoolcall -- uvx --from 'canitoolcall[mcp]' canitoolcall mcp`; generic clients use `{"mcpServers": {"canitoolcall": {"command": "uvx", "args": ["--from", "canitoolcall[mcp]", "canitoolcall", "mcp"]}}}`. `probe` sends requests, but only to loopback unless the operator allowed more at startup with `--allow-base-url`, and it sends an API key only if the operator bound a variable to that exact URL with `--allow-api-key-env VAR=URL`; refusals are generic by design. Use it only for a server the person you work for named. Details and the security note are in the README FAQ.
 
 ## Ready-made tasks
 

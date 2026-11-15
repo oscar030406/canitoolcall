@@ -151,13 +151,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="matrix.json the lookup tools read (default: the published one); callers cannot change it",
     )
     mc.add_argument(
+        "--allow-base-url",
+        action="append",
+        default=[],
+        metavar="URL",
+        help=(
+            "base URL (scheme, host, port, path prefix) the probe tool may target besides loopback "
+            "(repeatable). By default only loopback is reachable; private/link-local/metadata addresses "
+            "are refused after DNS resolution unless the URL is an allowlisted IP literal"
+        ),
+    )
+    mc.add_argument(
         "--allow-api-key-env",
         action="append",
         default=[],
-        metavar="VAR",
+        metavar="VAR=URL",
         help=(
-            f"environment variable the probe tool may read as an API key (repeatable; {DEFAULT_API_KEY_ENV} is "
-            "always allowed)"
+            "environment variable whose value the probe tool may send as an API key, ONLY to this exact base URL "
+            "(repeatable; the URL is also allowed as a target). No key is ever sent by default"
         ),
     )
 
@@ -339,13 +350,22 @@ def cmd_lookup(args: argparse.Namespace) -> int:
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
-    from canitoolcall.mcp_server import serve
+    import importlib.util
+
+    if importlib.util.find_spec("mcp") is None:
+        print(
+            "canitoolcall mcp: the MCP server needs the optional extra: pip install 'canitoolcall[mcp]'",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    from canitoolcall.mcp_server import ProbePolicy, serve
 
     try:
-        serve(args.matrix, (DEFAULT_API_KEY_ENV, *args.allow_api_key_env))
-    except ImportError as e:
+        policy = ProbePolicy.parse(args.allow_base_url, args.allow_api_key_env)
+    except ValueError as e:
         print(f"canitoolcall mcp: {e}", file=sys.stderr)
         return EXIT_ERROR
+    serve(args.matrix, policy)
     return EXIT_OK
 
 

@@ -19,7 +19,8 @@ pytest.importorskip("mcp")
 from mcp import Client
 
 from canitoolcall.cli import EXIT_ERROR, main
-from canitoolcall.mcp_server import build_server
+from canitoolcall.mcp_server import DENIED, ProbePolicy, build_server
+from canitoolcall.probe import BUILTIN_SCENARIOS
 
 from .conftest import MockOpenAI
 
@@ -59,8 +60,6 @@ MATRIX = {
     ],
 }
 
-DEFAULT_ALLOWED = ("CANITOOLCALL_API_KEY",)
-
 
 @pytest.fixture
 def matrix_path(tmp_path: Path) -> Path:
@@ -70,13 +69,13 @@ def matrix_path(tmp_path: Path) -> Path:
 
 
 def call(
-    tool: str, args: dict[str, Any] | None = None, *, matrix: Path, allowed: tuple[str, ...] = DEFAULT_ALLOWED
+    tool: str, args: dict[str, Any] | None = None, *, matrix: Path, policy: ProbePolicy | None = None
 ) -> tuple[bool, Any, str]:
     """Run one tool call through an in-process client; returns (is_error, structured content, text)."""
     out: list[tuple[bool, Any, str]] = []
 
     async def go() -> None:
-        async with Client(build_server(str(matrix), allowed)) as client:
+        async with Client(build_server(str(matrix), policy)) as client:
             r = await client.call_tool(tool, args or {})
             text = " ".join(getattr(c, "text", "") for c in r.content)
             out.append((bool(r.is_error), r.structured_content, text))
@@ -93,7 +92,9 @@ def test_lists_the_four_tools(matrix_path: Path) -> None:
             tools = (await client.list_tools()).tools
             names.extend(t.name for t in tools)
             probe_tool = next(t for t in tools if t.name == "probe")
-            assert "SENDS REQUESTS" in (probe_tool.description or "")
+            desc = probe_tool.description or ""
+            assert "SENDS REQUESTS" in desc
+            assert f"the {len(BUILTIN_SCENARIOS)} built-in" in desc and "about 10" not in desc
 
     anyio.run(go)
     assert sorted(names) == ["list_engines", "list_families", "lookup", "probe"]
@@ -149,33 +150,243 @@ def test_probe_reports_failures(matrix_path: Path, mock_openai: MockOpenAI) -> N
     assert not err and data["ok"] is False and data["summary"]["fail"] >= 1
 
 
-def test_probe_sends_the_named_key_but_never_returns_it(
+SECRET = "sk-test-not-a-real-key-123"
+PUBLIC_IP = "93.184.216.34"  # a public address; never contacted (connections are redirected to the local mock)
+
+
+def _bind(mock: MockOpenAI, var: str = "MCP_TEST_KEY") -> ProbePolicy:
+    return ProbePolicy.parse(allow_api_key_envs=[f"{var}={mock.base_url}"])
+
+
+def test_probe_sends_a_bound_key_but_never_returns_it(
     matrix_path: Path, mock_openai: MockOpenAI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    secret = "sk-test-not-a-real-key-123"
-    monkeypatch.setenv("MCP_TEST_KEY", secret)
+    monkeypatch.setenv("MCP_TEST_KEY", SECRET)
     args = {"base_url": mock_openai.base_url, "model": "m", "api_key_env": "MCP_TEST_KEY", "stream": False}
-    err, data, text = call("probe", args, matrix=matrix_path, allowed=(*DEFAULT_ALLOWED, "MCP_TEST_KEY"))
+    err, data, text = call("probe", args, matrix=matrix_path, policy=_bind(mock_openai))
     assert not err
-    assert any(h.get("Authorization") == f"Bearer {secret}" for h, _ in mock_openai.requests)
-    assert secret not in json.dumps(data) and secret not in text
+    assert any(h.get("Authorization") == f"Bearer {SECRET}" for h, _ in mock_openai.requests)
+    assert SECRET not in json.dumps(data) and SECRET not in text
 
 
-def test_probe_refuses_env_vars_the_operator_did_not_allow(
+def test_probe_sends_no_key_by_default(
+    matrix_path: Path, mock_openai: MockOpenAI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CANITOOLCALL_API_KEY is no longer implicitly granted: naming it without an operator binding is refused.
+    monkeypatch.setenv("CANITOOLCALL_API_KEY", SECRET)
+    args = {"base_url": mock_openai.base_url, "model": "m", "api_key_env": "CANITOOLCALL_API_KEY", "stream": False}
+    err, _, text = call("probe", args, matrix=matrix_path)
+    assert err and DENIED in text and SECRET not in text
+    assert not mock_openai.requests
+    # With no api_key_env nothing is attached even though the variable is set.
+    err, _, _ = call("probe", {"base_url": mock_openai.base_url, "model": "m", "stream": False}, matrix=matrix_path)
+    assert not err and mock_openai.requests and all("Authorization" not in h for h, _ in mock_openai.requests)
+
+
+def test_probe_refuses_unbound_env_vars(
     matrix_path: Path, mock_openai: MockOpenAI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SOME_OTHER_SECRET", "hunter2")
     args = {"base_url": mock_openai.base_url, "model": "m", "api_key_env": "SOME_OTHER_SECRET"}
-    err, _, text = call("probe", args, matrix=matrix_path)
-    assert err and "not allowed" in text and "hunter2" not in text
+    err, _, text = call("probe", args, matrix=matrix_path, policy=_bind(mock_openai))
+    assert err and DENIED in text and "hunter2" not in text
     assert not mock_openai.requests
 
 
+def test_probe_refuses_a_key_bound_to_another_url(
+    matrix_path: Path, mock_openai: MockOpenAI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCP_TEST_KEY", SECRET)
+    policy = ProbePolicy.parse(allow_api_key_envs=["MCP_TEST_KEY=https://api.example.com/v1"])
+    args = {"base_url": mock_openai.base_url, "model": "m", "api_key_env": "MCP_TEST_KEY"}
+    err, _, text = call("probe", args, matrix=matrix_path, policy=policy)
+    assert err and DENIED in text and SECRET not in text
+    assert not mock_openai.requests
+    # The exact bound URL only: another path or port is not it (a trailing slash and host case are).
+    assert not policy.key_for("MCP_TEST_KEY", "https://api.example.com/v2")
+    assert not policy.key_for("MCP_TEST_KEY", "https://api.example.com/v1/sub")
+    assert not policy.key_for("MCP_TEST_KEY", "https://api.example.com:8443/v1")
+    assert policy.key_for("MCP_TEST_KEY", "https://API.example.com/v1/")
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://example.invalid/v1", "https://10.0.0.5/v1", "http://169.254.169.254/latest", "http://[fd00:ec2::254]/v1"],
+)
+def test_probe_refuses_non_loopback_targets_without_resolving(
+    matrix_path: Path, monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    import socket
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("no DNS lookup or connection may happen for a refused target")
+
+    monkeypatch.setattr(socket, "getaddrinfo", boom)
+    monkeypatch.setattr(socket, "create_connection", boom)
+    err, _, text = call("probe", {"base_url": base_url, "model": "m"}, matrix=matrix_path)
+    assert err and DENIED in text
+
+
 def test_probe_refuses_key_over_plain_http_to_remote_host(matrix_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CANITOOLCALL_API_KEY", "sk-test")
-    args = {"base_url": "http://example.invalid/v1", "model": "m", "api_key_env": "CANITOOLCALL_API_KEY"}
-    err, _, text = call("probe", args, matrix=matrix_path)
-    assert err and "plain http" in text
+    monkeypatch.setenv("MCP_TEST_KEY", SECRET)
+    policy = ProbePolicy.parse(allow_api_key_envs=["MCP_TEST_KEY=http://models.example:8000/v1"])
+    args = {"base_url": "http://models.example:8000/v1", "model": "m", "api_key_env": "MCP_TEST_KEY"}
+    err, _, text = call("probe", args, matrix=matrix_path, policy=policy)
+    assert err and "plain http" in text and SECRET not in text
+
+
+@pytest.fixture
+def fake_dns(monkeypatch: pytest.MonkeyPatch, mock_openai: MockOpenAI) -> Callable[[str], list[str]]:
+    """Make every name resolve to a chosen address; connections to it go to the local mock server instead."""
+    import socket
+
+    connected: list[str] = []
+    real = socket.create_connection
+    port = int(mock_openai.base_url.split(":")[2].split("/")[0])
+
+    def install(ip: str) -> list[str]:
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        real_gai = socket.getaddrinfo
+
+        def gai(host: Any, p: Any, *a: Any, **k: Any) -> Any:
+            if host == "127.0.0.1":  # the redirected connection below resolves for real
+                return real_gai(host, p, *a, **k)
+            return [(family, socket.SOCK_STREAM, 6, "", (ip, p))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", gai)
+
+        def create(address: tuple[str, int], *a: Any, **k: Any) -> Any:
+            connected.append(address[0])
+            return real(("127.0.0.1", port), *a, **k)
+
+        monkeypatch.setattr(socket, "create_connection", create)
+        return connected
+
+    return install
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "10.0.0.5",
+        "192.168.1.9",
+        "172.16.0.1",
+        "169.254.169.254",
+        "169.254.10.10",
+        "100.64.0.1",
+        "224.0.0.1",
+        "0.0.0.0",
+        "127.0.0.1",
+        "::1",
+        "fd00:ec2::254",
+        "fe80::1",
+        "::ffff:10.0.0.5",
+        "::",
+    ],
+)
+def test_probe_refuses_hostnames_that_resolve_to_internal_addresses(
+    matrix_path: Path, mock_openai: MockOpenAI, fake_dns: Callable[[str], list[str]], ip: str
+) -> None:
+    connected = fake_dns(ip)
+    policy = ProbePolicy.parse(allow_base_urls=["http://models.example:8000/v1"])
+    args = {"base_url": "http://models.example:8000/v1", "model": "m"}
+    err, _, text = call("probe", args, matrix=matrix_path, policy=policy)
+    assert err and DENIED in text
+    assert ip not in text
+    assert not connected and not mock_openai.requests
+
+
+def test_probe_allows_an_allowlisted_hostname_with_a_public_address(
+    matrix_path: Path, mock_openai: MockOpenAI, fake_dns: Callable[[str], list[str]]
+) -> None:
+    connected = fake_dns(PUBLIC_IP)
+    policy = ProbePolicy.parse(allow_base_urls=["http://models.example:8000/v1"])
+    for url, ok in [
+        ("http://models.example:8000/v1", True),
+        ("http://models.example:8000/v1/", True),
+        ("http://MODELS.example:8000/v1/sub", True),
+        ("http://models.example:8000/v2", False),
+        ("http://models.example:8000/v10", False),
+        ("http://models.example:9000/v1", False),
+        ("https://models.example:8000/v1", False),
+    ]:
+        assert policy.target_allowed(url) is ok, url
+    args = {"base_url": "http://models.example:8000/v1", "model": "m", "stream": False}
+    err, data, text = call("probe", args, matrix=matrix_path, policy=policy)
+    assert not err and data["ok"] is True, text
+    assert set(connected) == {PUBLIC_IP}  # connected to the vetted address, not the name
+
+
+def test_probe_trusts_an_allowlisted_ip_literal(
+    matrix_path: Path, mock_openai: MockOpenAI, fake_dns: Callable[[str], list[str]]
+) -> None:
+    connected = fake_dns("10.0.0.5")
+    policy = ProbePolicy.parse(allow_base_urls=["http://10.0.0.5:8000/v1"])
+    args = {"base_url": "http://10.0.0.5:8000/v1", "model": "m", "stream": False}
+    err, _, _ = call("probe", args, matrix=matrix_path, policy=policy)
+    assert not err and connected
+    # a different private address is still refused
+    other = {"base_url": "http://10.0.0.6:8000/v1", "model": "m"}
+    err, _, text = call("probe", other, matrix=matrix_path, policy=policy)
+    assert err and DENIED in text
+
+
+def test_probe_loopback_hostname_must_resolve_to_loopback(
+    matrix_path: Path, mock_openai: MockOpenAI, fake_dns: Callable[[str], list[str]]
+) -> None:
+    connected = fake_dns("10.0.0.5")
+    err, _, text = call("probe", {"base_url": "http://localhost:8000/v1", "model": "m"}, matrix=matrix_path)
+    assert err and DENIED in text and "10.0.0.5" not in text
+    assert not connected
+
+
+def test_probe_does_not_follow_redirects_or_leak_the_key(
+    matrix_path: Path, mock_openai: MockOpenAI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Redirect(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(307)
+            self.send_header("Location", mock_openai.base_url + "/chat/completions")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        monkeypatch.setenv("MCP_TEST_KEY", SECRET)
+        policy = ProbePolicy.parse(allow_api_key_envs=[f"MCP_TEST_KEY={url}"])
+        args = {"base_url": url, "model": "m", "api_key_env": "MCP_TEST_KEY", "stream": False}
+        err, data, text = call("probe", args, matrix=matrix_path, policy=policy)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert not err and data["ok"] is False  # every scenario errored: redirects are refused
+    assert not mock_openai.requests  # the other origin never saw the request or the key
+    assert SECRET not in json.dumps(data) and SECRET not in text
+
+
+def test_policy_parse_rejects_bad_flags() -> None:
+    for bad in (["NOEQUALS"], ["=http://127.0.0.1/v1"], ["V="], ["V=ftp://x/v1"], ["V=http://u:p@h/v1"]):
+        with pytest.raises(ValueError):
+            ProbePolicy.parse(allow_api_key_envs=bad)
+    with pytest.raises(ValueError):
+        ProbePolicy.parse(allow_api_key_envs=["V=http://a/v1", "V=http://b/v1"])
+    with pytest.raises(ValueError):
+        ProbePolicy.parse(allow_base_urls=["not a url"])
+
+
+def test_cli_rejects_a_malformed_policy_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["mcp", "--allow-api-key-env", "JUSTAVAR"]) == EXIT_ERROR
+    assert "VAR=BASE_URL" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -194,15 +405,24 @@ def test_probe_validates_arguments(matrix_path: Path, args: dict[str, Any]) -> N
 
 
 def test_cli_reports_missing_extra(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    import builtins
+    import importlib.util
 
-    real_import: Callable[..., Any] = builtins.__import__
+    real_find_spec = importlib.util.find_spec
 
-    def fake(name: str, *a: Any, **k: Any) -> Any:
-        if name == "mcp" or name.startswith(("mcp.", "mcp_types")):
-            raise ImportError(name)
-        return real_import(name, *a, **k)
+    def fake(name: str, *a: Any) -> Any:
+        return None if name == "mcp" else real_find_spec(name, *a)
 
-    monkeypatch.setattr(builtins, "__import__", fake)
+    monkeypatch.setattr(importlib.util, "find_spec", fake)
     assert main(["mcp"]) == EXIT_ERROR
     assert "canitoolcall[mcp]" in capsys.readouterr().err
+
+
+def test_cli_does_not_swallow_other_import_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    import canitoolcall.mcp_server as ms
+
+    def broken(*a: Any, **k: Any) -> None:
+        raise ImportError("some other broken import")
+
+    monkeypatch.setattr(ms, "serve", broken)
+    with pytest.raises(ImportError, match="some other broken import"):
+        main(["mcp"])

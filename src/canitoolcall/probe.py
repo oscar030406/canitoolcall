@@ -25,6 +25,7 @@ reports, or echoed in error details.
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import socket
@@ -32,7 +33,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -535,6 +536,38 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
+ConnectFn = Callable[..., socket.socket]
+"""``socket.create_connection``-compatible: ``(address, timeout, source_address) -> socket``."""
+
+
+def guarded_opener(connect: ConnectFn) -> urllib.request.OpenerDirector:
+    """An opener that makes every TCP connection through ``connect`` instead of ``socket.create_connection``.
+
+    ``connect`` resolves and vets the address and connects to the vetted IP itself, so there is no gap between
+    the check and the connection (no DNS-rebinding window). Redirects are refused and environment proxies are
+    ignored (a proxy would connect on the caller's behalf, past the vetting). TLS still verifies the hostname.
+    """
+
+    class _Http(http.client.HTTPConnection):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._create_connection = connect
+
+    class _Https(http.client.HTTPSConnection):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._create_connection = connect
+
+    class _HttpHandler(urllib.request.HTTPHandler):
+        def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+            return self.do_open(_Http, req)
+
+    class _HttpsHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+            return self.do_open(_Https, req, context=getattr(self, "_context", None))
+
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect, _HttpHandler, _HttpsHandler)
+
 
 def safe_url(url: str) -> str:
     """``url`` without userinfo, query or fragment (they may carry credentials)."""
@@ -715,7 +748,14 @@ def _parse_message(payload: Mapping[str, Any], latency_s: float) -> ChatResponse
 
 
 def chat_response(
-    base_url: str, model: str, scenario: Scenario, *, stream: bool, api_key: str | None = None, timeout_s: float = 60.0
+    base_url: str,
+    model: str,
+    scenario: Scenario,
+    *,
+    stream: bool,
+    api_key: str | None = None,
+    timeout_s: float = 60.0,
+    opener: urllib.request.OpenerDirector | None = None,
 ) -> ChatResponse:
     """One /chat/completions request with protocol diagnostics.
 
@@ -729,7 +769,7 @@ def chat_response(
     t0 = time.monotonic()
     try:
         req = urllib.request.Request(_endpoint(base_url), data=body, headers=headers, method="POST")
-        with _OPENER.open(req, timeout=timeout_s) as resp:
+        with (opener or _OPENER).open(req, timeout=timeout_s) as resp:
             ctype = resp.headers.get("Content-Type", "")
             if stream and "text/event-stream" in ctype:
                 acc = _Accumulator()
@@ -972,10 +1012,18 @@ def compare_modes(nonstream: ParseResult, stream: ParseResult) -> tuple[ProbeSta
 
 
 def _run_one(
-    base_url: str, model: str, scenario: Scenario, stream: bool, api_key: str | None, timeout_s: float
+    base_url: str,
+    model: str,
+    scenario: Scenario,
+    stream: bool,
+    api_key: str | None,
+    timeout_s: float,
+    opener: urllib.request.OpenerDirector | None = None,
 ) -> ProbeOutcome:
     try:
-        resp = chat_response(base_url, model, scenario, stream=stream, api_key=api_key, timeout_s=timeout_s)
+        resp = chat_response(
+            base_url, model, scenario, stream=stream, api_key=api_key, timeout_s=timeout_s, opener=opener
+        )
     except ProbeRequestError as e:
         return ProbeOutcome(scenario.id, stream, "error", _redact(str(e), api_key), 0.0)
     status, detail, judged = evaluate_with_warnings(scenario, resp.result)
@@ -996,6 +1044,7 @@ def probe(
     stream_modes: Sequence[bool] = (False, True),
     timeout_s: float = 60.0,
     concurrency: int = 4,
+    opener: urllib.request.OpenerDirector | None = None,
 ) -> ProbeReport:
     """Run every scenario in every stream mode against the endpoint.
 
@@ -1006,7 +1055,7 @@ def probe(
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     todo = [(sc, mode) for sc in (BUILTIN_SCENARIOS if scenarios is None else scenarios) for mode in stream_modes]
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-        done = list(pool.map(lambda job: _run_one(base_url, model, job[0], job[1], api_key, timeout_s), todo))
+        done = list(pool.map(lambda job: _run_one(base_url, model, job[0], job[1], api_key, timeout_s, opener), todo))
 
     outcomes: list[ProbeOutcome] = []
     for sc in BUILTIN_SCENARIOS if scenarios is None else scenarios:

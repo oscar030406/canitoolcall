@@ -281,7 +281,17 @@ Use `--canitoolcall-fixtures PATH` to test against your own copy of the corpus.
 }
 ```
 
-The lookup tools read the published `matrix.json`, or the file or URL you start the server with (`... canitoolcall mcp --matrix PATH_OR_URL`); a tool caller cannot change it. **`probe` sends requests to the `base_url` the caller gives it**, so the tool description says so and your client should ask you before running it. Its API key comes only from an environment variable on the machine running the server, named by `api_key_env`: `CANITOOLCALL_API_KEY` is allowed by default, and any other name must be allowed when you start the server with `--allow-api-key-env VAR` (so a model cannot ask for `AWS_SECRET_ACCESS_KEY`). The key is sent only as the `Authorization` header to `base_url`, never over plain `http://` to a non-loopback host, and is never logged or returned. Without the extra, `canitoolcall mcp` exits with an install hint and everything else works as before.
+The lookup tools read the published `matrix.json`, or the file or URL you start the server with (`... canitoolcall mcp --matrix PATH_OR_URL`); a tool caller cannot change it.
+
+`probe` sends the scripted requests (9 scenarios, each non-streaming and streaming) to the `base_url` the caller gives it, so **the operator decides where it may go, when the server starts**, and the tool description says it sends requests. Flags:
+
+- Default: only loopback (`127.0.0.0/8`, `::1`, `localhost`) is reachable and no API key is ever sent.
+- `--allow-base-url URL` (repeatable): exact base URLs (scheme, host, port, path prefix) the tool may also target.
+- `--allow-api-key-env VAR=URL` (repeatable): the value of `VAR` is sent only to that exact base URL (which is also allowed as a target), and only as an `Authorization` header over `https://` or loopback. The tool's `api_key_env` argument must name a `VAR` bound to the `base_url` it asks for. There is no default key variable.
+
+Example: `canitoolcall mcp --allow-api-key-env MY_VLLM_KEY=https://vllm.internal.example/v1`.
+
+*Security note.* The tool's arguments come from a model, so a prompt-injected model must not be able to steer the server. It cannot pick a key or a host that you did not pair: unbound environment variables are never read, a key is never attached to a different URL, and refusals say only "target not allowed by server configuration" (no resolved addresses). Outside loopback, a hostname is resolved and the connection goes to the vetted address in the same step; private, link-local, CGNAT, multicast, unspecified, reserved and cloud-metadata addresses (for example `169.254.169.254`) are refused, unless you allowlisted an IP literal yourself. A loopback name must resolve to loopback. Redirects are never followed and environment proxies are ignored, so a key cannot move to another origin. The key is never logged or returned. Without the extra, `canitoolcall mcp` exits with an install hint and everything else works as before.
 
 **My engine or model isn't covered.** Adding a model family or an engine adapter is designed to be a single PR. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [good first issues](https://github.com/redd34/canitoolcall/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
 
