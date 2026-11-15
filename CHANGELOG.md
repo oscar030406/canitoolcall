@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Results snapshot `results/2026-11-15/` (nightly run 43690158071, linux-x86_64, 500 fixtures) with triage regenerated under the recovery contract (#36): two #13 findings retired, two refiled as `engine_bug`, and new findings for missing inner closes, raises on fixtures that do not accept `exception`, and derived cuts that drop a complete call or return its tail as content. 15 of the 16 predicted `soft_pass` cells confirmed. README and `llms.txt` now point at this snapshot.
 - `stream_equals_nonstream` and `split_invariance` give `soft_pass`, not `fail`, when two parses of an `expected_error` fixture differ only in recovered text (same tool calls and exception type), per the recovery contract (#36). Calls or raises that differ between modes still fail.
 - Recovery contract for malformed and truncated output (`docs/formats/recovery.md`, issue #36): recover complete calls, never return unfinished ones, compare modes on calls and exceptions for `expected_error` fixtures, count parser exceptions as outcomes.
 - `llama/l4-truncated-missing-close-bracket` now expects its first call: a call closed by its own `)` is complete even when the list never closes (recovery contract section 2). It previously accepted no calls.

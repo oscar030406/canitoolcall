@@ -157,7 +157,7 @@ Other useful commands:
 
 - `canitoolcall engines` lists the engine adapters, whether each one is set up, and the interpreter it uses.
 - `canitoolcall validate` checks fixtures against the spec.
-- `canitoolcall matrix --results results/2026-09-25` renders the committed snapshot of real runs through all five engines. [`results/2026-09-25/README.md`](results/2026-09-25/README.md) explains the snapshot, and its `triage.jsonl` classifies every failure, with a repro command for each.
+- `canitoolcall matrix --results results/2026-11-15` renders the latest committed snapshot of real runs through all five engines. [`results/2026-11-15/README.md`](results/2026-11-15/README.md) explains the snapshot, and its `triage.jsonl` classifies every failure, with a repro command for each.
 
 ## What it checks
 
