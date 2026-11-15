@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Two Mistral v3 derived-cut fixtures that stop after the last call's closing brace, before the list's closing `]` (`fixtures/mistral/derived-truncated.jsonl`). Every call is complete, so a correct parser keeps them (recovery contract section 2, #43). The notes of derived cuts with no unfinished call now state that rule instead of "the unfinished call must not be returned".
+
 ## [0.2.0] - 2026-11-15
 
 Fixture spec 0.2, a recovery contract for malformed and truncated output, 31 new fixtures (500 in total) and a
