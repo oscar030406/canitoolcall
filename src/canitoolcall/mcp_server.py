@@ -12,19 +12,26 @@ chosen once at startup with ``--matrix``, never by the caller) and ``probe``
 from __future__ import annotations
 
 import asyncio
+import base64
+import http.client
 import ipaddress
 import os
 import socket
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, quote_plus, urljoin, urlsplit
 
-from canitoolcall.lookup import DEFAULT_MATRIX, DEFAULT_SITE, LookupFailure, load_matrix
+from canitoolcall.lookup import DEFAULT_MATRIX, DEFAULT_SITE, LookupFailure, clean, load_matrix
 from canitoolcall.lookup import lookup as lookup_matrix
 
 MAX_TIMEOUT_S = 120.0
 MAX_CONCURRENCY = 8
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+"""Total bytes read from one endpoint response (JSON body or the whole SSE stream)."""
+MAX_ERROR_DETAIL = 200
+"""Bytes of an HTTP error body (or other error detail) returned to the caller."""
+MIN_KEY_LEN = 8
 
 MCP_MISSING_HINT = "the MCP server needs the optional extra: pip install 'canitoolcall[mcp]'"
 
@@ -33,11 +40,30 @@ def _site_base(source: str) -> str:
     return urljoin(source, ".") if source.startswith(("http://", "https://")) else DEFAULT_SITE
 
 
+def _scrub_source(message: str, source: str) -> str:
+    """``message`` with the operator's matrix source shown without userinfo, query or fragment."""
+    from canitoolcall.probe import safe_url
+
+    if not source.startswith(("http://", "https://")):
+        return message
+    p = urlsplit(source)
+    try:
+        shown = safe_url(source)
+    except ValueError:
+        shown = "<matrix url>"
+    for secret in (p.username, p.password, p.query, p.fragment):
+        if secret:
+            message = message.replace(secret, "***")
+    for raw in (source, clean(source)):
+        message = message.replace(raw, shown)
+    return message
+
+
 def _load(source: str) -> dict[str, Any]:
     try:
         return load_matrix(source)
     except LookupFailure as e:
-        raise ValueError(str(e)) from None
+        raise ValueError(_scrub_source(str(e), source)) from None
 
 
 def tool_lookup(source: str, name: str, engine: str | None = None) -> dict[str, Any]:
@@ -45,7 +71,7 @@ def tool_lookup(source: str, name: str, engine: str | None = None) -> dict[str, 
     try:
         return lookup_matrix(load_matrix(source), name, engine or None, _site_base(source))
     except LookupFailure as e:
-        raise ValueError(str(e)) from None
+        raise ValueError(_scrub_source(str(e), source)) from None
 
 
 def tool_list_families(source: str) -> dict[str, Any]:
@@ -80,8 +106,11 @@ _METADATA = frozenset(ipaddress.ip_address(a) for a in ("169.254.169.254", "fd00
 
 def _normalize(url: str) -> tuple[str, str, int, str]:
     """(scheme, host, port, path) with the default port made explicit and no trailing slash."""
+    from canitoolcall.probe import check_url_path
+
+    check_url_path(url)
     p = urlsplit(url)
-    port = p.port or (443 if p.scheme == "https" else 80)
+    port = p.port if p.port is not None else (443 if p.scheme == "https" else 80)
     return p.scheme, (p.hostname or "").rstrip(".").lower(), port, p.path.rstrip("/")
 
 
@@ -111,16 +140,36 @@ def _is_ip_literal(host: str) -> bool:
     return True
 
 
+_GLOBAL_V6 = ipaddress.ip_network("2000::/3")
+_TRANSLATION_V6 = tuple(
+    ipaddress.ip_network(n)
+    for n in (
+        "::/96",  # IPv4-compatible (deprecated)
+        "64:ff9b::/96",  # NAT64
+        "64:ff9b:1::/48",  # local-use NAT64
+        "2002::/16",  # 6to4
+        "2001::/32",  # Teredo
+    )
+)
+
+
 def _unsafe_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Not public unicast: private, loopback, link-local, CGNAT, multicast, unspecified, reserved or metadata."""
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    """Not public unicast: private, loopback, link-local, site-local, CGNAT, multicast, unspecified, reserved,
+    metadata, or an IPv6 translation address. A mapped address is judged as its IPv4 address; 6to4, Teredo,
+    NAT64 and IPv4-compatible (::/96) addresses embed an IPv4 address we do not try to vet, so they are refused."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:  # a mapped address is just its IPv4 address
+            return _unsafe_address(ip.ipv4_mapped)
+        if ip not in _GLOBAL_V6 or any(ip in net for net in _TRANSLATION_V6):
+            return True  # also covers ::/8, fe80::/10, fec0::/10, fc00::/7, ff00::/8
     return (
         not ip.is_global
         or ip.is_multicast
         or ip.is_unspecified
         or ip.is_link_local
         or ip.is_loopback
+        or ip.is_reserved
+        or ip.is_private
         or ip in _METADATA
         or (isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT)
     )
@@ -204,7 +253,40 @@ class ProbePolicy:
 
 def _hostport(base_url: str) -> tuple[str, int]:
     p = urlsplit(base_url)
-    return p.hostname or "", p.port or (443 if p.scheme == "https" else 80)
+    return p.hostname or "", p.port if p.port is not None else (443 if p.scheme == "https" else 80)
+
+
+def _key_forms(key: str) -> list[str]:
+    """The key as it could appear in an echoed header or body: raw, ``Bearer`` form, base64 and percent-encoded."""
+    forms: set[str] = set()
+    for text in (key, f"Bearer {key}", f"Basic {key}"):
+        raw = text.encode("utf-8")
+        forms.update((text, quote(text, safe=""), quote_plus(text)))
+        for enc in (base64.b64encode, base64.urlsafe_b64encode):
+            b = enc(raw).decode("ascii")
+            forms.update((b, b.rstrip("=")))
+    return sorted(forms, key=len, reverse=True)  # longest first, so "Bearer <key>" goes before "<key>"
+
+
+def _redact_tree(value: Any, forms: list[str]) -> Any:
+    """Every string (and dict key) in ``value``, recursively, with each form of the key replaced."""
+    if isinstance(value, str):
+        for form in forms:
+            value = value.replace(form, "***")
+        return value
+    if isinstance(value, dict):
+        return {_redact_tree(k, forms): _redact_tree(v, forms) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_tree(v, forms) for v in value]
+    return value
+
+
+def _trim_errors(result: dict[str, Any]) -> None:
+    """Cap the detail of errored requests (HTTP status line, body snippet, redirect target)."""
+    for o in result.get("outcomes", ()):
+        d = o.get("detail")
+        if o.get("status") == "error" and isinstance(d, str) and len(d.encode("utf-8")) > MAX_ERROR_DETAIL + 16:
+            o["detail"] = d.encode("utf-8")[: MAX_ERROR_DETAIL + 16].decode("utf-8", "ignore")
 
 
 def tool_probe(
@@ -217,8 +299,20 @@ def tool_probe(
     *,
     policy: ProbePolicy | None = None,
 ) -> dict[str, Any]:
-    """Run ``canitoolcall probe`` against ``base_url`` if the operator's ``policy`` allows it; never returns the key."""
-    from canitoolcall.probe import ProbeRequestError, check_base_url, guarded_opener, insecure_key_transport, probe
+    """Run ``canitoolcall probe`` against ``base_url`` if the operator's ``policy`` allows it; never returns the key.
+
+    The key (raw, ``Bearer`` form, base64 and percent-encoded) is removed from every string of the returned
+    report, and keys shorter than 8 characters are never sent. Responses are capped at 8 MB and
+    ``2 * timeout_s`` seconds each; error details are cut to status plus 200 bytes.
+    """
+    from canitoolcall.probe import (
+        ProbeRequestError,
+        ResponseLimits,
+        check_base_url,
+        guarded_opener,
+        insecure_key_transport,
+        probe,
+    )
 
     policy = policy or ProbePolicy()
     check_base_url(base_url)  # ValueError with a readable message
@@ -237,13 +331,15 @@ def tool_probe(
         if not policy.key_for(api_key_env, base_url):
             raise ValueError(DENIED)
         api_key = os.environ.get(api_key_env) or None
+        if api_key is not None and len(api_key) < MIN_KEY_LEN:
+            raise ValueError(DENIED)  # too short to redact reliably, so never sent
     if api_key and insecure_key_transport(base_url):
         raise ValueError("refusing to send an API key over plain http to a non-loopback host; use https")
     connect = policy.connector(base_url)
     # One vetted connection up front: a refused or unreachable target fails fast with a generic message.
     try:
         connect(_hostport(base_url), min(timeout_s, 10.0)).close()
-    except OSError:
+    except (OSError, ValueError, http.client.HTTPException):
         raise ValueError(f"cannot reach the target, or {DENIED}") from None
     try:
         report = probe(
@@ -254,11 +350,16 @@ def tool_probe(
             timeout_s=timeout_s,
             concurrency=concurrency,
             opener=guarded_opener(connect),
+            limits=ResponseLimits(max_bytes=MAX_RESPONSE_BYTES, deadline_s=2 * timeout_s, error_bytes=MAX_ERROR_DETAIL),
         )
-    except ProbeRequestError:
+    except (ProbeRequestError, ValueError, http.client.HTTPException):
         raise ValueError("probe failed") from None
     result = report.to_dict()
     result["ok"] = not any(o.status in ("fail", "error") for o in report.outcomes)
+    if api_key:
+        # The whole report, not just error strings: a bound endpoint may echo the Authorization header anywhere.
+        result = _redact_tree(result, _key_forms(api_key))
+    _trim_errors(result)
     return result
 
 

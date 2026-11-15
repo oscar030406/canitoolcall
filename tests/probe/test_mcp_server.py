@@ -426,3 +426,332 @@ def test_cli_does_not_swallow_other_import_errors(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(ms, "serve", broken)
     with pytest.raises(ImportError, match="some other broken import"):
         main(["mcp"])
+
+
+# --------------------------------------------------------------------------- hardening
+
+
+class RawServer:
+    """A throwaway 127.0.0.1 server whose POST handler is a plain function ``(handler, request headers) -> None``."""
+
+    def __init__(self, respond: Callable[[Any, dict[str, str]], None]) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        outer = self
+        self.requests: list[dict[str, str]] = []
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                headers = dict(self.headers.items())
+                outer.requests.append(headers)
+                try:
+                    respond(self, headers)
+                except (BrokenPipeError, ConnectionResetError):
+                    self.close_connection = True
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv.daemon_threads = True
+        self.base_url = f"http://127.0.0.1:{self.srv.server_address[1]}/v1"
+        threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+
+    def close(self) -> None:
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+def send_json(h: Any, status: int, payload: Any, ctype: str = "application/json") -> None:
+    body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    h.send_response(status)
+    h.send_header("Content-Type", ctype)
+    h.send_header("Content-Length", str(len(body)))
+    h.end_headers()
+    h.wfile.write(body)
+
+
+def completion(content: str) -> dict[str, Any]:
+    return {"choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]}
+
+
+@pytest.fixture
+def raw_server() -> Any:
+    made: list[RawServer] = []
+
+    def make(respond: Callable[[Any, dict[str, str]], None]) -> RawServer:
+        made.append(RawServer(respond))
+        return made[-1]
+
+    yield make
+    for m in made:
+        m.close()
+
+
+def test_key_echoed_in_response_content_is_redacted_everywhere(
+    matrix_path: Path, raw_server: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import base64
+    from urllib.parse import quote
+
+    key = "sk-echo key+/=ABC123"
+    forms = [
+        key,
+        f"Bearer {key}",
+        base64.b64encode(key.encode()).decode(),
+        base64.b64encode(f"Bearer {key}".encode()).decode(),
+        quote(key, safe=""),
+        quote(f"Bearer {key}", safe=""),
+    ]
+
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        assert headers["Authorization"] == f"Bearer {key}"
+        send_json(h, 200, completion(" | ".join(forms) + " " + headers["Authorization"]))
+
+    srv = raw_server(respond)
+    monkeypatch.setenv("MCP_TEST_KEY", key)
+    policy = ProbePolicy.parse(allow_api_key_envs=[f"MCP_TEST_KEY={srv.base_url}"])
+    args = {"base_url": srv.base_url, "model": "m", "api_key_env": "MCP_TEST_KEY", "stream": False}
+    err, data, text = call("probe", args, matrix=matrix_path, policy=policy)
+    assert not err and data["outcomes"]
+    blob = json.dumps(data) + text
+    for f in forms:
+        assert f not in blob
+        assert json.dumps(f)[1:-1] not in blob
+    assert "***" in blob  # the echo really reached the report and was redacted
+
+
+def test_short_keys_are_never_sent(matrix_path: Path, mock_openai: MockOpenAI, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCP_TEST_KEY", "short7!")
+    args = {"base_url": mock_openai.base_url, "model": "m", "api_key_env": "MCP_TEST_KEY", "stream": False}
+    err, _, text = call("probe", args, matrix=matrix_path, policy=_bind(mock_openai))
+    assert err and DENIED in text and "short7!" not in text
+    assert not mock_openai.requests
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/../admin",
+        "/v1/./x",
+        "/v1/%2e%2e/admin",
+        "/v1/%2E%2E/admin",
+        "/v1/.%2e/admin",
+        "/v1/%252e%252e/admin",
+        "/v1%2fadmin",
+        "/v1%2Fadmin",
+        "/v1%5cadmin",
+        "/v1%5Cadmin",
+        "/v1\\admin",
+        "/v1\r\nX-Evil: 1",
+        "/v1\nadmin",
+        "/v1/\x00x",
+        "/v1/%00x",
+        "/v1 /x",
+    ],
+)
+def test_base_urls_with_ambiguous_paths_are_rejected(matrix_path: Path, mock_openai: MockOpenAI, path: str) -> None:
+    from canitoolcall.mcp_server import _covers
+    from canitoolcall.probe import check_base_url
+
+    with pytest.raises(ValueError):
+        check_base_url("https://api.example.com" + path)
+    with pytest.raises(ValueError):
+        _covers("https://api.example.com/v1", "https://api.example.com" + path)
+    with pytest.raises(ValueError):
+        ProbePolicy.parse(allow_base_urls=["https://api.example.com" + path])
+    # And through the tool, against an operator-allowed prefix and against loopback.
+    policy = ProbePolicy.parse(allow_base_urls=["https://api.example.com/v1"])
+    for base in ("https://api.example.com" + path, mock_openai.base_url.removesuffix("/v1") + path):
+        err, _, _ = call("probe", {"base_url": base, "model": "m"}, matrix=matrix_path, policy=policy)
+        assert err
+    assert not mock_openai.requests
+
+
+def test_port_zero_is_rejected(matrix_path: Path) -> None:
+    err, _, text = call("probe", {"base_url": "http://127.0.0.1:0/v1", "model": "m"}, matrix=matrix_path)
+    assert err and "port" in text
+    with pytest.raises(ValueError):
+        ProbePolicy.parse(allow_base_urls=["https://api.example.com:0/v1"])
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "::10.0.0.5",  # IPv4-compatible
+        "::a9fe:a9fe",  # IPv4-compatible 169.254.169.254
+        "::ffff:169.254.169.254",
+        "::ffff:127.0.0.1",
+        "64:ff9b::a00:5",  # NAT64 -> 10.0.0.5
+        "64:ff9b::a9fe:a9fe",  # NAT64 -> metadata
+        "64:ff9b:1::a00:5",  # local-use NAT64
+        "2002:a00:5::1",  # 6to4 -> 10.0.0.5
+        "2002:a9fe:a9fe::1",  # 6to4 -> metadata
+        "2001:0:4136:e378:8000:63bf:3fff:fdd2",  # Teredo
+        "fec0::1",  # site-local
+        "fd00::1",
+        "ff02::1",
+        "100::1",  # discard-only
+        "2001:db8::1",
+        "::2",
+    ],
+)
+def test_unsafe_ipv6_forms_are_classified_unsafe(ip: str) -> None:
+    import ipaddress
+
+    from canitoolcall.mcp_server import _unsafe_address
+
+    assert _unsafe_address(ipaddress.ip_address(ip))
+
+
+def test_public_addresses_stay_safe() -> None:
+    import ipaddress
+
+    from canitoolcall.mcp_server import _unsafe_address
+
+    for ip in ("8.8.8.8", "::ffff:8.8.8.8", "2606:4700:4700::1111", "2a00:1450:4001::200e"):
+        assert not _unsafe_address(ipaddress.ip_address(ip))
+
+
+@pytest.mark.parametrize("ip", ["64:ff9b::a00:5", "2002:a00:5::1", "::10.0.0.5", "fec0::1", "::ffff:169.254.169.254"])
+def test_probe_refuses_hostnames_resolving_to_translation_addresses(
+    matrix_path: Path, mock_openai: MockOpenAI, fake_dns: Callable[[str], list[str]], ip: str
+) -> None:
+    connected = fake_dns(ip)
+    policy = ProbePolicy.parse(allow_base_urls=["https://api.example.com/v1"])
+    args = {"base_url": "https://api.example.com/v1", "model": "m"}
+    err, _, text = call("probe", args, matrix=matrix_path, policy=policy)
+    assert err and ip not in text
+    assert not connected and not mock_openai.requests
+
+
+def test_invalid_url_from_the_worker_becomes_a_generic_error(
+    matrix_path: Path, mock_openai: MockOpenAI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import http.client
+
+    import canitoolcall.probe as probe_mod
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise http.client.InvalidURL("URL can't contain control characters")
+
+    monkeypatch.setattr(probe_mod, "probe", boom)
+    err, _, text = call("probe", {"base_url": mock_openai.base_url, "model": "m"}, matrix=matrix_path)
+    assert err and "probe failed" in text and "control characters" not in text
+
+    # And inside chat_response the same exception is a per-scenario error, not a crash.
+    class Opener:
+        def open(self, *a: Any, **k: Any) -> Any:
+            raise http.client.InvalidURL("bad")
+
+    with pytest.raises(probe_mod.ProbeRequestError):
+        probe_mod.chat_response(
+            mock_openai.base_url,
+            "m",
+            BUILTIN_SCENARIOS[0],
+            stream=False,
+            opener=Opener(),  # type: ignore[arg-type]
+        )
+
+
+def test_oversized_responses_are_cut_off(matrix_path: Path, raw_server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import canitoolcall.mcp_server as mod
+
+    monkeypatch.setattr(mod, "MAX_RESPONSE_BYTES", 20_000)
+
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        send_json(h, 200, completion("x" * 200_000))
+
+    srv = raw_server(respond)
+    err, data, _ = call("probe", {"base_url": srv.base_url, "model": "m", "stream": False}, matrix=matrix_path)
+    assert not err and data["ok"] is False
+    assert all(o["status"] == "error" and "larger than 20000 bytes" in o["detail"] for o in data["outcomes"])
+
+
+def test_oversized_sse_streams_are_cut_off(matrix_path: Path, raw_server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import canitoolcall.mcp_server as mod
+
+    monkeypatch.setattr(mod, "MAX_RESPONSE_BYTES", 20_000)
+
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        h.send_response(200)
+        h.send_header("Content-Type", "text/event-stream")
+        h.send_header("Connection", "close")
+        h.end_headers()
+        chunk = {"choices": [{"index": 0, "delta": {"content": "y" * 1000}}]}
+        for _ in range(200):
+            h.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        h.close_connection = True
+
+    srv = raw_server(respond)
+    err, data, _ = call("probe", {"base_url": srv.base_url, "model": "m", "stream": True}, matrix=matrix_path)
+    assert not err
+    streamed = [o for o in data["outcomes"] if o["stream"] and o["status"] == "error"]
+    assert streamed and all("larger than" in o["detail"] for o in streamed)
+
+
+def test_a_dripping_stream_hits_the_overall_deadline(matrix_path: Path, raw_server: Any) -> None:
+    import time
+
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        h.send_response(200)
+        h.send_header("Content-Type", "text/event-stream")
+        h.send_header("Connection", "close")
+        h.end_headers()
+        chunk = {"choices": [{"index": 0, "delta": {"content": "."}}]}
+        for _ in range(400):  # 20 s of bytes, each gap far shorter than the socket timeout
+            h.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            h.wfile.flush()
+            time.sleep(0.05)
+        h.close_connection = True
+
+    srv = raw_server(respond)
+    t0 = time.monotonic()
+    args = {"base_url": srv.base_url, "model": "m", "stream": False, "timeout_s": 0.4, "concurrency": 8}
+    err, data, _ = call("probe", args, matrix=matrix_path)
+    assert not err
+    assert time.monotonic() - t0 < 15
+    assert any(
+        "overall deadline" in (o.get("detail") or "") or "unreadable" in (o.get("detail") or "")
+        for o in data["outcomes"]
+    )
+
+
+def test_http_error_detail_is_trimmed_and_redacted(
+    matrix_path: Path, raw_server: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        body = (headers["Authorization"] + " " + "z" * 5000).encode()
+        send_json(h, 500, body, "text/plain")
+
+    srv = raw_server(respond)
+    monkeypatch.setenv("MCP_TEST_KEY", SECRET)
+    policy = ProbePolicy.parse(allow_api_key_envs=[f"MCP_TEST_KEY={srv.base_url}"])
+    args = {"base_url": srv.base_url, "model": "m", "api_key_env": "MCP_TEST_KEY", "stream": False}
+    err, data, text = call("probe", args, matrix=matrix_path, policy=policy)
+    assert not err
+    for o in data["outcomes"]:
+        assert o["detail"].startswith("HTTP 500") and len(o["detail"]) <= 240
+    assert SECRET not in json.dumps(data) + text
+
+
+def test_matrix_source_secrets_are_scrubbed_from_errors() -> None:
+    source = "http://alice:hunter2pw@127.0.0.1:1/matrix.json?token=sekrit-token#frag-secret"
+    out: list[str] = []
+    for tool, args in (("lookup", {"name": "alpha"}), ("list_families", {}), ("list_engines", {})):
+
+        async def go(tool: str = tool, args: dict[str, Any] = args) -> None:
+            async with Client(build_server(source)) as client:
+                r = await client.call_tool(tool, args)
+                assert r.is_error
+                out.append(" ".join(getattr(c, "text", "") for c in r.content))
+
+        anyio.run(go)
+    for text in out:
+        assert "cannot read" in text
+        for secret in ("alice", "hunter2pw", "sekrit-token", "frag-secret"):
+            assert secret not in text

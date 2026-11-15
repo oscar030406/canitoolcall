@@ -28,6 +28,7 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -481,7 +482,8 @@ def check_base_url(url: str) -> str:
         port = p.port  # raises ValueError for a bad port
     except ValueError as e:
         raise ValueError(f"invalid URL {url!r}: {e}") from None
-    del port
+    if port == 0:
+        raise ValueError("base URL port must not be 0")
     if p.scheme not in ("http", "https"):
         raise ValueError(f"base URL must start with http:// or https:// (got {safe_url(url) or url!r})")
     if not p.hostname:
@@ -490,7 +492,33 @@ def check_base_url(url: str) -> str:
         raise ValueError("base URL must not contain user:password@; pass the key with --api-key-env")
     if p.query or p.fragment:
         raise ValueError("base URL must not contain a query or fragment")
+    check_url_path(url)
     return url
+
+
+_CONTROL = re.compile(r"[\x00-\x20\x7f-\x9f]")
+
+
+def check_url_path(url: str) -> None:
+    """Reject URLs whose path could be read differently by the allowlist and by the server.
+
+    Refused: control characters or spaces anywhere, backslashes, encoded slashes, backslashes and NULs
+    (``%2f``, ``%5c``, ``%00``, any case), and ``.`` / ``..`` segments, raw or percent-encoded (``%2e``),
+    even double-encoded. Raises ``ValueError``.
+    """
+    if _CONTROL.search(url) or "\\" in url:
+        raise ValueError("base URL must not contain control characters, spaces or backslashes")
+    path = urllib.parse.urlsplit(url).path
+    if re.search(r"%(?:2f|5c|00)", path, re.IGNORECASE):
+        raise ValueError("base URL path must not contain encoded slashes, backslashes or NULs")
+    for segment in path.split("/"):
+        for _ in range(3):
+            if segment in (".", ".."):
+                raise ValueError("base URL path must not contain '.' or '..' segments")
+            decoded = urllib.parse.unquote(segment)
+            if decoded == segment:
+                break
+            segment = decoded
 
 
 def is_loopback(url: str) -> bool:
@@ -747,6 +775,51 @@ def _parse_message(payload: Mapping[str, Any], latency_s: float) -> ChatResponse
     )
 
 
+@dataclass(frozen=True)
+class ResponseLimits:
+    """Optional caps on one response (the CLI sets none; the MCP server sets all)."""
+
+    max_bytes: int | None = None
+    """Total bytes read from the body (JSON body, or all SSE lines)."""
+    deadline_s: float | None = None
+    """Wall-clock budget for the whole request, however slowly the server drips bytes."""
+    error_bytes: int = 300
+    """Bytes of an HTTP error body kept in the error message."""
+
+
+class _Budget:
+    def __init__(self, limits: ResponseLimits | None) -> None:
+        self.limit = limits.max_bytes if limits else None
+        self.deadline = time.monotonic() + limits.deadline_s if limits and limits.deadline_s else None
+        self.used = 0
+
+    def spend(self, n: int) -> None:
+        self.used += n
+        if self.limit is not None and self.used > self.limit:
+            raise ProbeRequestError(f"response larger than {self.limit} bytes")
+        if self.deadline is not None and time.monotonic() > self.deadline:
+            raise ProbeRequestError("request exceeded its overall deadline")
+
+    def lines(self, resp: Any) -> Iterator[bytes]:
+        """Lines of the body; reads whatever has arrived (``read1``) so the deadline is checked on every packet."""
+        buf = b""
+        while chunk := resp.read1(8192):
+            self.spend(len(chunk))
+            buf += chunk
+            *done, buf = buf.split(b"\n")
+            for line in done:
+                yield line + b"\n"
+        if buf:
+            yield buf
+
+    def read_all(self, resp: Any) -> bytes:
+        parts: list[bytes] = []
+        while chunk := resp.read1(65536):
+            self.spend(len(chunk))
+            parts.append(chunk)
+        return b"".join(parts)
+
+
 def chat_response(
     base_url: str,
     model: str,
@@ -756,6 +829,7 @@ def chat_response(
     api_key: str | None = None,
     timeout_s: float = 60.0,
     opener: urllib.request.OpenerDirector | None = None,
+    limits: ResponseLimits | None = None,
 ) -> ChatResponse:
     """One /chat/completions request with protocol diagnostics.
 
@@ -767,30 +841,37 @@ def chat_response(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     t0 = time.monotonic()
+    budget = _Budget(limits)
     try:
         req = urllib.request.Request(_endpoint(base_url), data=body, headers=headers, method="POST")
         with (opener or _OPENER).open(req, timeout=timeout_s) as resp:
             ctype = resp.headers.get("Content-Type", "")
             if stream and "text/event-stream" in ctype:
                 acc = _Accumulator()
-                for data in iter_sse_data(resp):
+                for data in iter_sse_data(budget.lines(resp)):
                     if data.strip() == "[DONE]":
                         break
                     acc.add_chunk(json.loads(data))
                 return acc.finish(time.monotonic() - t0)
-            payload = json.loads(resp.read().decode("utf-8"))
+            payload = json.loads(budget.read_all(resp).decode("utf-8"))
             out = _parse_message(payload, time.monotonic() - t0)
             if stream:
                 note = f"stream=true was ignored (Content-Type {ctype or 'missing'!r}, not text/event-stream)"
                 return ChatResponse(out.result, out.latency_s, out.finish_reason, (*out.problems, note), out.warnings)
             return out
     except urllib.error.HTTPError as e:
-        snippet = e.read().decode("utf-8", "replace")[:300] if e.fp is not None else ""
-        raise ProbeRequestError(_redact(f"HTTP {e.code} {e.reason}: {snippet}".strip(), api_key)) from None
+        n = limits.error_bytes if limits else 300
+        snippet = e.read(n).decode("utf-8", "replace") if e.fp is not None else ""
+        reason = f" {e.reason}" if limits is None else ""
+        raise ProbeRequestError(_redact(f"HTTP {e.code}{reason}: {snippet}".strip(), api_key)) from None
+    except ProbeRequestError:
+        raise
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise ProbeRequestError(_redact(f"request failed: {e}", api_key)) from None
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise ProbeRequestError(f"unreadable response: {e}") from None
+    except http.client.HTTPException as e:  # InvalidURL, BadStatusLine, LineTooLong, IncompleteRead ...
+        raise ProbeRequestError(_redact(f"invalid HTTP exchange: {type(e).__name__}", api_key)) from None
     except ValueError as e:  # e.g. "unknown url type" from Request()
         raise ProbeRequestError(_redact(f"invalid request URL: {e}", api_key)) from None
 
@@ -1019,10 +1100,11 @@ def _run_one(
     api_key: str | None,
     timeout_s: float,
     opener: urllib.request.OpenerDirector | None = None,
+    limits: ResponseLimits | None = None,
 ) -> ProbeOutcome:
     try:
         resp = chat_response(
-            base_url, model, scenario, stream=stream, api_key=api_key, timeout_s=timeout_s, opener=opener
+            base_url, model, scenario, stream=stream, api_key=api_key, timeout_s=timeout_s, opener=opener, limits=limits
         )
     except ProbeRequestError as e:
         return ProbeOutcome(scenario.id, stream, "error", _redact(str(e), api_key), 0.0)
@@ -1045,6 +1127,7 @@ def probe(
     timeout_s: float = 60.0,
     concurrency: int = 4,
     opener: urllib.request.OpenerDirector | None = None,
+    limits: ResponseLimits | None = None,
 ) -> ProbeReport:
     """Run every scenario in every stream mode against the endpoint.
 
@@ -1055,7 +1138,9 @@ def probe(
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     todo = [(sc, mode) for sc in (BUILTIN_SCENARIOS if scenarios is None else scenarios) for mode in stream_modes]
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-        done = list(pool.map(lambda job: _run_one(base_url, model, job[0], job[1], api_key, timeout_s, opener), todo))
+        done = list(
+            pool.map(lambda job: _run_one(base_url, model, job[0], job[1], api_key, timeout_s, opener, limits), todo)
+        )
 
     outcomes: list[ProbeOutcome] = []
     for sc in BUILTIN_SCENARIOS if scenarios is None else scenarios:
