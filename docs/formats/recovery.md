@@ -1,7 +1,8 @@
 # Malformed and truncated output: the recovery contract
 
-**Status: proposed** in [#36](https://github.com/redd34/canitoolcall/issues/36). Section 3 is implemented in
-`canitoolcall.checks.compare_modes`. The rest of the code changes the rule implies are listed under
+**Status: accepted** in [#36](https://github.com/redd34/canitoolcall/issues/36) (proposed in
+[#39](https://github.com/redd34/canitoolcall/pull/39)). Section 3 is implemented in `canitoolcall.checks.compare_modes`
+([#41](https://github.com/redd34/canitoolcall/pull/41)). The rest of the code changes the rule implies are listed under
 [Follow-up work](#follow-up-work).
 
 The [spec](../../spec/README.md#expected-results) says what well-formed output must parse to. This page says what a
@@ -68,6 +69,15 @@ not even as a partial call that a stream emits before it raises. Returning the t
 token-prefix truncations) raising are all accepted. A call that was complete before the cut is kept: the
 `*-truncated-second-parallel-call` fixtures already expect the first call.
 
+**A call is complete once its own close is present**, even when an enclosing list or section never closes. In
+`[get_weather(city="San Francisco"), get_weather(city="Seattle` the first call is closed by its `)`, so it must be
+returned, and only the unfinished second call is dropped (`llama/l4-truncated-missing-close-bracket`). The same holds
+for a JSON call list (`[TOOL_CALLS][{…}, {…`) and for a closed call inside an unclosed tool-calls section.
+
+**When a complete call is kept, the unfinished tail is not content.** Those fixtures expect `content: null`.
+Returning the kept call together with the cut text as content leaks markers and is `fail`. Passing the text through
+as content is accepted only when no call is returned.
+
 **Why.** The model never finished the call. Its arguments are either invalid JSON or were completed by the parser, and
 for a mutating tool a call completed by guesswork is the dangerous outcome. Ollama rejects unfinished calls on purpose
 for this reason. According to
@@ -108,9 +118,12 @@ differences on `expected_error` fixtures:
 | Engine | Fixtures |
 |---|---|
 | vLLM (6) | `deepseek/vllm-v3-malformed-missing-call-tokens`, `gpt-oss/vllm-malformed-headers`, `mistral/vllm-v3-malformed-not-json`, `qwen3-hermes/bug-sglang-30480-truncated-at-opener`, `qwen3-hermes/sglang-malformed-json-in-tags`, `qwen3-hermes/truncated-after-open-tag` |
-| SGLang (5) | `gemma4/vllm-malformed-no-brace`, `gemma4/truncated-in-name`, `llama/l4-truncated-missing-close-bracket`, `qwen3-hermes/bug-sglang-30480-truncated-at-opener`, `qwen3-hermes/sglang-malformed-json-in-tags` |
+| SGLang (5) | `gemma4/vllm-malformed-no-brace`, `gemma4/truncated-in-name`, `llama/l4-truncated-missing-close-bracket`\*, `qwen3-hermes/bug-sglang-30480-truncated-at-opener`, `qwen3-hermes/sglang-malformed-json-in-tags` |
 | llama.cpp (4) | `gemma4/vllm-malformed-no-brace`, `gemma4/truncated-in-name`, `kimi/k3-vllm-truncated-tools`, `qwen3-hermes/truncated-after-open-tag` |
 | Ollama (1) | `gpt-oss/harmony-truncated-in-arguments` |
+
+\* Predicted before the section 2 rule on complete calls. That fixture now expects its first call, so its cell is
+judged by `expected` instead.
 
 This resolves the six vLLM cases in `vllm-malformed-content-recovery-contract` and `vllm-harmony-recovery-newline`
 from [#13](https://github.com/redd34/canitoolcall/pull/13).
@@ -149,9 +162,10 @@ stays `fail`. Its triage moves from `untriaged_discrepancy` to a finding under t
 
 ## Fixture labels
 
-**No fixture's expected value or accepted outcomes change.** Every malformed fixture with `expected` is a section 1
-case with an unambiguous extent, and every `expected_error` fixture's `accept` list already follows sections 2 and 4.
-The rule changes how two checks compare modes (section 3), not what any fixture expects.
+**One fixture changes.** `llama/l4-truncated-missing-close-bracket` moved from `expected_error` to `expected` with its
+first call, under the section 2 rule on complete calls. It was the only `expected_error` fixture whose cut follows a
+complete call. Every other malformed fixture with `expected` is a section 1 case with an unambiguous extent, and every
+other `expected_error` fixture's `accept` list already follows sections 2 and 4.
 
 ## Follow-up work
 
@@ -163,7 +177,9 @@ The rule changes how two checks compare modes (section 3), not what any fixture 
    `vllm-harmony-recovery-newline`, and file `vllm-harmony-malformed-header-rejection` and
    `vllm-deepseek-v3-malformed-call-fragments` under this rule. Move `glm/glm47-missing-last-close-arg-value` out of
    `sglang-other` and `llamacpp-other`.
-3. **Derived-cut fixtures** (offered by oscar030406): take a small set of cuts at structural boundaries from
+3. **Derived-cut fixtures** (done in [#42](https://github.com/redd34/canitoolcall/pull/42) by oscar030406): take a small set of cuts at structural boundaries from
    `engine_test` fixtures, not every token boundary. Tag them `x-derived-truncation` and `truncated`, and give each one
    the outcome section 2 assigns. These cuts are the evidence for the "text completed before the cut" decision.
+   Still to add: the cuts before `]` in Llama 4 pythonic and Mistral v3 call lists, now that section 2 decides
+   complete calls in an unclosed list.
 4. **#37:** post the recovery patch on ollama#18663, following Ollama's contribution policy.
