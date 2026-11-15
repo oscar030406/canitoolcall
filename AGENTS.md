@@ -55,11 +55,13 @@ Example output (sglang#41319, run on 2026-09-27):
 
 ```text
 sgl-project/sglang#41319  base 3ed56a341 -> head 941d0d2bb
-fixtures replayed: 48 (12 unsupported)   fixed: 3   regressed: 0   other changes: 0
+fixtures replayed: 48   fixed: 3   regressed: 0   other changes: 0
   gemma4/edge-values-key-with-space: fail -> pass
   gemma4/nested-objects-and-arrays: fail -> pass
   gemma4/numeric-arguments: fail -> pass
 ```
+
+Runs since this change also print "(N unsupported)" on the `fixtures replayed` line.
 
 The exit code is 0 when nothing regressed, 1 on a regression, and 3 if the PR can't be replayed on the pinned engine or its replay reports are invalid or incomplete (including mismatched fixture inventories).
 
