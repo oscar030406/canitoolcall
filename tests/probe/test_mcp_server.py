@@ -19,7 +19,7 @@ pytest.importorskip("mcp")
 from mcp import Client
 
 from canitoolcall.cli import EXIT_ERROR, main
-from canitoolcall.mcp_server import DENIED, ProbePolicy, build_server
+from canitoolcall.mcp_server import DENIED, MAX_ERROR_DETAIL, ProbePolicy, build_server
 from canitoolcall.probe import BUILTIN_SCENARIOS
 
 from .conftest import MockOpenAI
@@ -869,3 +869,39 @@ def test_clip_redacted_drops_trailing_key_prefixes() -> None:
     # a raw cut inside the key leaves a prefix of >= 4 characters: dropped
     assert _clip_redacted(b"abc " + SECRET[:9].encode(), 200, SECRET) == "abc "
     assert _clip_redacted(b"abc " + SECRET[:3].encode(), 200, SECRET) == "abc " + SECRET[:3]
+
+
+@pytest.mark.parametrize("inside", [4, 6, 11])
+def test_key_cut_by_the_error_payload_snippet_is_redacted(
+    matrix_path: Path, raw_server: Any, monkeypatch: pytest.MonkeyPatch, inside: int
+) -> None:
+    """Regression guard: a key straddling the error-detail cut must not survive in part.
+
+    Today every snippet cut (the probe's 300 characters) is followed by the 216-byte trim, which removes the
+    fragment either way; this keeps that true if either limit changes. ``_drop_key_tail`` is tested directly below.
+    """
+    key = "sk-SnippetKey0123456789"
+    shown = MAX_ERROR_DETAIL + 16  # what _trim_errors keeps
+    pad = shown - len('error response: {"message": "') - inside  # the cut lands `inside` characters into the key
+
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        send_json(h, 200, {"error": {"message": "A" * pad + key + " tail"}})
+
+    srv = raw_server(respond)
+    monkeypatch.setenv("MCP_TEST_KEY", key)
+    policy = ProbePolicy.parse(allow_api_key_envs=[f"MCP_TEST_KEY={srv.base_url}"])
+    args = {"base_url": srv.base_url, "model": "m", "api_key_env": "MCP_TEST_KEY", "stream": False}
+    _, data, text = call("probe", args, matrix=matrix_path, policy=policy)
+    blob = json.dumps(data) + text
+    assert "A" * 50 in blob  # the snippet really reached the report
+    assert key[:inside] not in blob
+
+
+def test_drop_key_tail_leaves_ordinary_text_alone() -> None:
+    from canitoolcall.mcp_server import _drop_key_tail, _key_forms
+
+    forms = _key_forms("sk-SnippetKey0123456789")
+    assert _drop_key_tail("send it as Bearer", forms) == "send it as Bearer"
+    assert _drop_key_tail("ends with sk-S", forms) == "ends with ***"
+    assert _drop_key_tail("auth: Bearer sk-Sni", forms) == "auth: ***"
+    assert _drop_key_tail("ends with sk-", forms) == "ends with sk-"

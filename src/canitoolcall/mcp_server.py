@@ -261,12 +261,49 @@ def _key_forms(key: str) -> list[str]:
     return key_forms(key)
 
 
+_KEY_TAIL_MIN = 4
+"""Shortest trailing key fragment that is dropped (characters of the key itself, after any scheme word)."""
+
+
+def _scheme_lead(form: str) -> int:
+    """Length of a leading ``Bearer``/``Basic`` word and its separator (space, ``+`` or ``%20``), else 0."""
+    for word in ("Bearer", "Basic"):
+        if form.startswith(word):
+            for sep in (" ", "+", "%20"):
+                if form.startswith(word + sep):
+                    return len(word) + len(sep)
+    return 0
+
+
+def _drop_key_tail(text: str, forms: list[str]) -> str:
+    """Remove a trailing run that is the start of a key form: what is left when a cut lands inside the key.
+
+    For ``Bearer <key>`` and ``Basic <key>`` forms (and their encoded spellings) the fragment must reach at least
+    4 characters into the key, so text that merely ends in "Bearer" is left alone.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for form in forms:
+            lead = _scheme_lead(form)
+            for k in range(min(len(form) - 1, len(text)), lead + _KEY_TAIL_MIN - 1, -1):
+                if text.endswith(form[:k]):
+                    text, changed = text[:-k] + "***", True
+                    break
+            if changed:
+                break
+    return text
+
+
 def _redact_tree(value: Any, forms: list[str]) -> Any:
-    """Every string (and dict key) in ``value``, recursively, with each form of the key replaced."""
+    """Every string (and dict key) in ``value``, recursively, with each form of the key replaced.
+
+    A trailing fragment of a key form (left by an earlier truncation) is replaced too.
+    """
     if isinstance(value, str):
         for form in forms:
             value = value.replace(form, "***")
-        return value
+        return _drop_key_tail(value, forms)
     if isinstance(value, dict):
         return {_redact_tree(k, forms): _redact_tree(v, forms) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -349,10 +386,12 @@ def tool_probe(
         raise ValueError("probe failed") from None
     result = report.to_dict()
     result["ok"] = not any(o.status in ("fail", "error") for o in report.outcomes)
+    # Trim first, then redact: every cut (here and the probe's own 300-character error snippets) happens before
+    # redaction, and _redact_tree also drops a trailing fragment of the key that a cut left behind.
+    _trim_errors(result)
     if api_key:
         # The whole report, not just error strings: a bound endpoint may echo the Authorization header anywhere.
         result = _redact_tree(result, _key_forms(api_key))
-    _trim_errors(result)
     return result
 
 
