@@ -649,11 +649,27 @@ def _environment(templates_dir: Path) -> jinja2.Environment:
     return env
 
 
-def matrix_json(matrix: Matrix) -> dict[str, Any]:
+MATRIX_SCHEMA_VERSION = "1.0"
+"""``matrix.json`` schema version (``MAJOR.MINOR``, see ``spec/README.md``)."""
+
+
+def _family_info(corpus: _Corpus) -> dict[str, Any]:
+    """Display name and model repos per family, so ``lookup`` can resolve model names."""
+    info: dict[str, Any] = {}
+    for slug, fam in sorted(corpus.families.items()):
+        models = {m.repo for m in fam.reference_models}
+        models.update(m for fx in corpus.fixtures.values() if fx.family == slug for m in fx.models)
+        info[slug] = {"name": fam.name, "models": sorted(models)}
+    return info
+
+
+def matrix_json(matrix: Matrix, family_info: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """The aggregated grid as plain JSON (written to ``matrix.json``)."""
     return {
+        "schema_version": MATRIX_SCHEMA_VERSION,
         "canitoolcall_version": __version__,
         "families": list(matrix.families),
+        **({"family_info": dict(family_info)} if family_info else {}),
         "engines": [
             {
                 "name": r.engine.name,
@@ -720,7 +736,7 @@ def render_site(
         if matrix.run_for(run.engine.name, run.engine.version) is run:
             data_files[(run.engine.name, run.engine.version)] = f"data/{name}"
     (out_dir / ".nojekyll").write_text("", encoding="utf-8")
-    (out_dir / "matrix.json").write_text(_pretty(matrix_json(matrix)) + "\n", encoding="utf-8")
+    (out_dir / "matrix.json").write_text(_pretty(matrix_json(matrix, _family_info(corpus))) + "\n", encoding="utf-8")
 
     family_names = {slug: fam.name for slug, fam in corpus.families.items()}
     engine_checks = {

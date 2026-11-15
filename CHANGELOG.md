@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `canitoolcall lookup NAME [--engine E] [--matrix PATH_OR_URL] [--json]` answers "does family or model X parse on engine Y?" from the published `matrix.json` (stdlib HTTP, with a timeout; unknown names, unreachable sources and unsupported schema versions exit 2).
+- `matrix.json` now has a versioned schema (`spec/matrix.schema.json`, `schema_version` "1.0", rules in `spec/README.md`) and an optional `family_info` map of family names and model repos. Existing fields are unchanged.
+
 ## [0.2.0] - 2026-11-15
 
 Fixture spec 0.2, a recovery contract for malformed and truncated output, 31 new fixtures (500 in total) and a

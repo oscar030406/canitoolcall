@@ -443,3 +443,85 @@ def test_run_synthetic_strategies_do_not_count(tmp_path: Path) -> None:
     page = render_site(_write(tmp_path, [one_token]), tmp_path / "site")
     cell_page = (page.parent / cell_path("ollama", "7af39318", "qwen3-hermes")).read_text(encoding="utf-8")
     assert "streams one token per event" in cell_page
+
+
+# --------------------------------------------------------------------------- matrix.json schema and lookup
+
+
+def _built_matrix_json(tmp_path: Path, sample_fixtures_dir: Path) -> Path:
+    out = tmp_path / "site"
+    render_site(_write(tmp_path, _sample_runs()), out, fixtures_dir=sample_fixtures_dir)
+    return out / "matrix.json"
+
+
+def test_matrix_json_validates_against_schema(tmp_path: Path, sample_fixtures_dir: Path) -> None:
+    import jsonschema
+
+    schema = json.loads((Path(__file__).parents[2] / "spec" / "matrix.schema.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    data = json.loads(_built_matrix_json(tmp_path, sample_fixtures_dir).read_text(encoding="utf-8"))
+    jsonschema.validate(data, schema)
+    assert data["schema_version"] == "1.0"
+    assert "qwen3-hermes" in data["family_info"]
+
+
+def test_lookup_cli(tmp_path: Path, sample_fixtures_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = _built_matrix_json(tmp_path, sample_fixtures_dir)
+    assert main(["lookup", "qwen3-hermes", "--matrix", str(path)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "vllm 0.30.0" in out and "sglang 0.5.20" in out and "cells/vllm/0.30.0/qwen3-hermes.html" in out
+
+    assert main(["lookup", "QWEN3-HERMES", "--engine", "VLLM", "--json", "--matrix", str(path)]) == EXIT_OK
+    result = json.loads(capsys.readouterr().out)
+    assert result["family"] == "qwen3-hermes" and [c["engine"] for c in result["cells"]] == ["vllm"]
+    assert result["cells"][0]["status"] == "fail"
+    assert result["cells"][0]["url"].startswith("https://redd34.github.io/canitoolcall/cells/")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    model = data["family_info"]["qwen3-hermes"]["models"][0]
+    assert main(["lookup", model.lower(), "--json", "--matrix", str(path)]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)["matched_by"] == "model name"
+
+
+def test_lookup_errors(tmp_path: Path, sample_fixtures_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = _built_matrix_json(tmp_path, sample_fixtures_dir)
+    assert main(["lookup", "no-such-family", "--matrix", str(path)]) == EXIT_ERROR
+    assert "unknown family or model" in capsys.readouterr().err
+    assert main(["lookup", "qwen3-hermes", "--engine", "nope", "--matrix", str(path)]) == EXIT_ERROR
+    assert "unknown engine" in capsys.readouterr().err
+    assert main(["lookup", "qwen3-hermes", "--matrix", str(tmp_path / "missing.json")]) == EXIT_ERROR
+    assert "cannot read" in capsys.readouterr().err
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for bad in ({**data, "schema_version": "2.0"}, {k: v for k, v in data.items() if k != "schema_version"}):
+        bad_path = tmp_path / "bad.json"
+        bad_path.write_text(json.dumps(bad), encoding="utf-8")
+        assert main(["lookup", "qwen3-hermes", "--matrix", str(bad_path)]) == EXIT_ERROR
+        assert "schema_version" in capsys.readouterr().err
+    bad_path.write_text("not json", encoding="utf-8")
+    assert main(["lookup", "qwen3-hermes", "--matrix", str(bad_path)]) == EXIT_ERROR
+
+
+def test_lookup_without_family_info_matches_slug_only(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    out = tmp_path / "site"
+    render_site(_write(tmp_path, _sample_runs()), out, fixtures_dir=tmp_path / "no-corpus")
+    path = out / "matrix.json"
+    assert "family_info" not in json.loads(path.read_text(encoding="utf-8"))
+    assert main(["lookup", "qwen3-hermes", "--matrix", str(path)]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["lookup", "Qwen/Qwen3-8B", "--matrix", str(path)]) == EXIT_ERROR
+    assert "no model list" in capsys.readouterr().err
+
+
+def test_lookup_unreachable_url_is_an_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import urllib.error
+    import urllib.request
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise urllib.error.URLError("no network in tests")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert main(["lookup", "qwen3-hermes", "--matrix", "https://example.invalid/matrix.json"]) == EXIT_ERROR
+    assert "cannot read" in capsys.readouterr().err

@@ -266,6 +266,8 @@ Use `--canitoolcall-fixtures PATH` to test against your own copy of the corpus.
 
 **What is a soft pass?** A result that differs from the expected one only in whitespace, such as a leading newline in the reasoning. It is also given when, for malformed or truncated output, streaming and non-streaming return the same calls but recover different text. The matrix shows soft passes separately from passes.
 
+**Does family or model X parse on engine Y?** Ask without a checkout: `canitoolcall lookup qwen3-hermes --engine vllm` (or a model name such as `Qwen/Qwen3.5-9B`, and `--json` for scripts). It reads the published [`matrix.json`](https://redd34.github.io/canitoolcall/matrix.json); `--matrix PATH_OR_URL` reads another one. The format is documented in [`spec/README.md`](spec/README.md#matrixjson).
+
 **My engine or model isn't covered.** Adding a model family or an engine adapter is designed to be a single PR. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [good first issues](https://github.com/redd34/canitoolcall/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
 
 ## For AI agents
