@@ -574,6 +574,14 @@ def default_templates_dir() -> Path:
     return Path(__file__).resolve().parent / "_data" / "templates"
 
 
+def default_spec_dir() -> Path:
+    """``spec`` in a checkout, else the copy shipped in the wheel."""
+    root = repo_root()
+    if root is not None and (root / "spec").is_dir():
+        return root / "spec"
+    return Path(__file__).resolve().parent / "_data" / "spec"
+
+
 def _safe(part: str) -> str:
     """A path segment that is safe on every filesystem and in URLs."""
     return re.sub(r"[^A-Za-z0-9._-]", "_", part).lstrip(".") or "_"
@@ -736,6 +744,10 @@ def render_site(
         if matrix.run_for(run.engine.name, run.engine.version) is run:
             data_files[(run.engine.name, run.engine.version)] = f"data/{name}"
     (out_dir / ".nojekyll").write_text("", encoding="utf-8")
+    schema = default_spec_dir() / "matrix.schema.json"
+    if schema.is_file():  # published at the schema's $id
+        (out_dir / "spec").mkdir(exist_ok=True)
+        shutil.copyfile(schema, out_dir / "spec" / "matrix.schema.json")
     (out_dir / "matrix.json").write_text(_pretty(matrix_json(matrix, _family_info(corpus))) + "\n", encoding="utf-8")
 
     family_names = {slug: fam.name for slug, fam in corpus.families.items()}

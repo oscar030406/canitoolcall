@@ -135,7 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH_OR_URL",
         help="matrix.json to read (default: the published https://redd34.github.io/canitoolcall/matrix.json)",
     )
-    lk.add_argument("--json", action="store_true", help="print the answer as JSON")
+    lk.add_argument(
+        "--json",
+        action="store_true",
+        help="print the answer as JSON. The exit code is 0 whenever the lookup works, even if the status is "
+        "fail: scripts should read the status from this output",
+    )
 
     m = sub.add_parser("matrix", help="build the static matrix site from results files")
     m.add_argument(
@@ -300,13 +305,14 @@ def cmd_matrix(args: argparse.Namespace) -> int:
 def cmd_lookup(args: argparse.Namespace) -> int:
     from urllib.parse import urljoin
 
-    from canitoolcall.lookup import DEFAULT_MATRIX, DEFAULT_SITE, LookupError_, format_table, load_matrix, lookup
+    from canitoolcall.lookup import DEFAULT_MATRIX, LookupFailure, format_table, load_matrix, lookup
 
     source = args.matrix or DEFAULT_MATRIX
-    base = urljoin(source, ".") if source.startswith(("http://", "https://")) else DEFAULT_SITE
+    # Page paths are relative to the matrix's own location: its URL's directory, or nothing for a file.
+    base = urljoin(source, ".") if source.startswith(("http://", "https://")) else ""
     try:
         result = lookup(load_matrix(source), args.name, args.engine, base)
-    except LookupError_ as e:
+    except LookupFailure as e:
         print(f"canitoolcall lookup: {e}", file=sys.stderr)
         return EXIT_ERROR
     print(json.dumps(result, indent=2) if args.json else format_table(result))

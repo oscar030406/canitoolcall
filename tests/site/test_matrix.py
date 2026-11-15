@@ -475,7 +475,7 @@ def test_lookup_cli(tmp_path: Path, sample_fixtures_dir: Path, capsys: pytest.Ca
     result = json.loads(capsys.readouterr().out)
     assert result["family"] == "qwen3-hermes" and [c["engine"] for c in result["cells"]] == ["vllm"]
     assert result["cells"][0]["status"] == "fail"
-    assert result["cells"][0]["url"].startswith("https://redd34.github.io/canitoolcall/cells/")
+    assert result["cells"][0]["url"].startswith("cells/")  # local file: path relative to the matrix
 
     data = json.loads(path.read_text(encoding="utf-8"))
     model = data["family_info"]["qwen3-hermes"]["models"][0]
@@ -525,3 +525,152 @@ def test_lookup_unreachable_url_is_an_error(
     monkeypatch.setattr(urllib.request, "urlopen", boom)
     assert main(["lookup", "qwen3-hermes", "--matrix", "https://example.invalid/matrix.json"]) == EXIT_ERROR
     assert "cannot read" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- lookup hardening
+
+
+def _doc(**cell: object) -> dict[str, object]:
+    base_cell = {
+        "family": "alpha",
+        "engine": "vllm",
+        "engine_version": "1.0",
+        "status": "pass",
+        "counts": {"pass": 1},
+        "pass_rate": 1.0,
+        "run_at": "2026-01-01T00:00:00Z",
+        "page": "cells/vllm/1.0/alpha.html",
+    }
+    return {
+        "schema_version": "1.0",
+        "families": ["alpha", "alphabet", "beta"],
+        "family_info": {
+            "alpha": {"name": "Alpha", "models": ["org/Alpha-7B"]},
+            "alphabet": {"name": "Alphabet", "models": ["org/Alphabet-1B"]},
+            "beta": {"name": "Beta", "models": ["org/Beta-3B"]},
+        },
+        "engines": [{"name": "vllm"}],
+        "cells": [{**base_cell, **cell}],
+    }
+
+
+def _write_doc(tmp_path: Path, doc: object) -> Path:
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def test_lookup_neutralises_control_characters(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    evil = "\x1b]0;pwned\x07\x9b2J"
+    doc = _doc(engine="vl" + evil, engine_version="1" + evil, page="cells/" + evil + ".html")
+    doc["families"] = ["alpha", evil]
+    doc["cells"][0]["family"] = "alpha"  # type: ignore[index]
+    doc["engines"] = [{"name": "vl" + evil}]
+    path = _write_doc(tmp_path, doc)
+    for extra in ([], ["--json"]):
+        assert main(["lookup", "alpha", "--matrix", str(path), *extra]) == EXIT_OK
+        out = capsys.readouterr().out
+        assert not any((ord(ch) < 0x20 and ch != "\n") or 0x7F <= ord(ch) < 0xA0 for ch in out)
+        assert "\\x1b" in out
+    assert main(["lookup", "zzz-nope", "--matrix", str(path)]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "\x1b" not in err and "\\x1b" in err
+
+
+def test_lookup_rejects_bad_status_and_pages(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["lookup", "alpha", "--matrix", str(_write_doc(tmp_path, _doc(status="great")))]) == EXIT_ERROR
+    assert "status" in capsys.readouterr().err
+    for page in (
+        "https://evil.example/x",
+        "//evil.example/x",
+        "/abs/x.html",
+        "../x.html",
+        "cells/../../x",
+        "javascript:alert(1)",
+    ):
+        path = _write_doc(tmp_path, _doc(page=page))
+        assert main(["lookup", "alpha", "--matrix", str(path)]) == EXIT_ERROR, page
+        assert "outside the site" in capsys.readouterr().err
+
+
+def test_lookup_rejects_oversized_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from canitoolcall import lookup as lk
+
+    monkeypatch.setattr(lk, "MAX_BYTES", 100)
+    path = tmp_path / "big.json"
+    path.write_text(" " * 200 + json.dumps(_doc()), encoding="utf-8")
+    with pytest.raises(lk.LookupFailure, match="larger than"):
+        lk.load_matrix(str(path))
+
+
+def test_lookup_old_matrix_without_schema_version_explains(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    doc = _doc()
+    del doc["schema_version"]
+    assert main(["lookup", "alpha", "--matrix", str(_write_doc(tmp_path, doc))]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "canitoolcall < 0.3" in err and "--matrix" in err and "nightly" in err
+
+
+def test_lookup_resolution(tmp_path: Path) -> None:
+    from canitoolcall.lookup import LookupFailure, resolve_family
+
+    doc = _doc()
+    assert resolve_family(doc, "alpha") == ("alpha", "family slug")  # exact beats the longer "alphabet"
+    assert resolve_family(doc, "ORG/beta-3b") == ("beta", "model name")
+    assert resolve_family(doc, "beta-3b") == ("beta", "model name")
+    assert resolve_family(doc, "beta-3") == ("beta", "partial match")
+    with pytest.raises(LookupFailure, match="several families"):
+        resolve_family(doc, "alp")
+    with pytest.raises(LookupFailure, match="at least 3"):
+        resolve_family(doc, "be")
+    with pytest.raises(LookupFailure, match="at least 3"):
+        resolve_family(doc, "b")
+
+
+def test_lookup_multi_version_engine_uses_latest(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    doc = _doc()
+    cells = doc["cells"]
+    assert isinstance(cells, list)
+    cells.append({**cells[0], "engine_version": "0.10.0", "status": "fail", "page": "cells/vllm/0.10.0/alpha.html"})
+    cells.append({**cells[0], "engine_version": "0.9.1", "page": "cells/vllm/0.9.1/alpha.html"})
+    path = _write_doc(tmp_path, doc)
+    assert main(["lookup", "alpha", "--json", "--matrix", str(path)]) == EXIT_OK
+    result = json.loads(capsys.readouterr().out)
+    assert [(c["engine_version"], c["status"]) for c in result["cells"]] == [("1.0", "pass")]
+    cells[0]["engine_version"] = "0.9.0"
+    path = _write_doc(tmp_path, doc)
+    assert main(["lookup", "alpha", "--json", "--matrix", str(path)]) == EXIT_OK
+    assert [c["engine_version"] for c in json.loads(capsys.readouterr().out)["cells"]] == ["0.10.0"]
+
+
+def test_lookup_over_http_and_page_base(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import functools
+    import http.server
+    import threading
+
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "matrix.json").write_text(json.dumps(_doc()), encoding="utf-8")
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(tmp_path / "site"))
+    handler.log_message = lambda *a, **k: None  # type: ignore[attr-defined]
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/matrix.json"
+        assert main(["lookup", "alpha", "--json", "--matrix", url]) == EXIT_OK
+        result = json.loads(capsys.readouterr().out)
+        assert result["cells"][0]["url"] == url.replace("matrix.json", "cells/vllm/1.0/alpha.html")
+    finally:
+        server.shutdown()
+        server.server_close()
+    # a local file prints the page path alone, not the default site
+    path = _write_doc(tmp_path, _doc())
+    assert main(["lookup", "alpha", "--json", "--matrix", str(path)]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)["cells"][0]["url"] == "cells/vllm/1.0/alpha.html"
+
+
+def test_render_site_publishes_matrix_schema(tmp_path: Path, sample_fixtures_dir: Path) -> None:
+    out = tmp_path / "site"
+    render_site(_write(tmp_path, _sample_runs()), out, fixtures_dir=sample_fixtures_dir)
+    published = json.loads((out / "spec" / "matrix.schema.json").read_text(encoding="utf-8"))
+    assert published["$id"] == "https://redd34.github.io/canitoolcall/spec/matrix.schema.json"
