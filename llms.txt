@@ -14,7 +14,7 @@ Use it to answer "will this model's tool calls parse correctly on this engine?",
 - [AGENTS.md](https://github.com/redd34/canitoolcall/blob/main/AGENTS.md): guide for AI coding agents, including ready-made tasks and rules
 - [Fixture spec](https://github.com/redd34/canitoolcall/blob/main/spec/README.md): the language-neutral JSONL fixture format
 - [Format notes](https://github.com/redd34/canitoolcall/tree/main/docs/formats): the raw tool-call format of each model family, with sources
-- [Triage](https://github.com/redd34/canitoolcall/blob/main/results/2026-09-25/triage.jsonl): the classified cause of every failing case, with repro commands
+- [Triage](https://github.com/redd34/canitoolcall/blob/main/results/2026-11-15/triage.jsonl): the classified cause of every failing case, with repro commands
 
 ## Contribute
 - Tell us your goal: https://github.com/redd34/canitoolcall/issues/new?template=agent_checkin.yml

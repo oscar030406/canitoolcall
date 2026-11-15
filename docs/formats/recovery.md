@@ -125,6 +125,8 @@ differences on `expected_error` fixtures:
 \* Predicted before the section 2 rule on complete calls. That fixture now expects its first call, so its cell is
 judged by `expected` instead.
 
+Confirmed by the [2026-11-15 snapshot](../../results/2026-11-15/README.md): the other 15 cells are `soft_pass`.
+
 This resolves the six vLLM cases in `vllm-malformed-content-recovery-contract` and `vllm-harmony-recovery-newline`
 from [#13](https://github.com/redd34/canitoolcall/pull/13).
 
@@ -173,7 +175,7 @@ other `expected_error` fixture's `accept` list already follows sections 2 and 4.
    `expected_error` fixtures when the calls and exception type are equal and only `content` or `reasoning_content`
    differ. Document it under "Normalization policy" in `spec/README.md`, with a regression test for each direction:
    text difference → `soft_pass`, call or raise difference → `fail`.
-2. **Triage (after the next run):** regenerate `triage.jsonl`. Retire `vllm-malformed-content-recovery-contract` and
+2. **Triage** (done in the [2026-11-15 snapshot](../../results/2026-11-15/README.md)): regenerate `triage.jsonl`. Retire `vllm-malformed-content-recovery-contract` and
    `vllm-harmony-recovery-newline`, and file `vllm-harmony-malformed-header-rejection` and
    `vllm-deepseek-v3-malformed-call-fragments` under this rule. Move `glm/glm47-missing-last-close-arg-value` out of
    `sglang-other` and `llamacpp-other`.
