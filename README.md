@@ -268,6 +268,21 @@ Use `--canitoolcall-fixtures PATH` to test against your own copy of the corpus.
 
 **Does family or model X parse on engine Y?** Ask without a checkout: `canitoolcall lookup qwen3-hermes --engine vllm` (or a model name such as `Qwen/Qwen3.5-9B`, and `--json` for scripts). It reads the published [`matrix.json`](https://redd34.github.io/canitoolcall/matrix.json) (this works once the site has been rebuilt by a release that includes `lookup`; until then the published file has no `schema_version` and `lookup` says so, and `--matrix PATH_OR_URL` reads a newer one). The exit code is 0 whenever the lookup works, even if the status is `fail`; scripts should read `status` from `--json`. Queries of fewer than 3 characters only match exactly. The format is documented in [`spec/README.md`](spec/README.md#matrixjson).
 
+**Can my agent ask this over MCP?** Yes. `pip install 'canitoolcall[mcp]'` adds `canitoolcall mcp`, a stdio [MCP](https://modelcontextprotocol.io) server with four tools: `lookup` (same answer as `canitoolcall lookup --json`), `list_families`, `list_engines` and `probe`. Claude Code: `claude mcp add canitoolcall -- uvx --from 'canitoolcall[mcp]' canitoolcall mcp`. Other clients (generic `mcpServers` JSON):
+
+```json
+{
+  "mcpServers": {
+    "canitoolcall": {
+      "command": "uvx",
+      "args": ["--from", "canitoolcall[mcp]", "canitoolcall", "mcp"]
+    }
+  }
+}
+```
+
+The lookup tools read the published `matrix.json`, or the file or URL you start the server with (`... canitoolcall mcp --matrix PATH_OR_URL`); a tool caller cannot change it. **`probe` sends requests to the `base_url` the caller gives it**, so the tool description says so and your client should ask you before running it. Its API key comes only from an environment variable on the machine running the server, named by `api_key_env`: `CANITOOLCALL_API_KEY` is allowed by default, and any other name must be allowed when you start the server with `--allow-api-key-env VAR` (so a model cannot ask for `AWS_SECRET_ACCESS_KEY`). The key is sent only as the `Authorization` header to `base_url`, never over plain `http://` to a non-loopback host, and is never logged or returned. Without the extra, `canitoolcall mcp` exits with an install hint and everything else works as before.
+
 **My engine or model isn't covered.** Adding a model family or an engine adapter is designed to be a single PR. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [good first issues](https://github.com/redd34/canitoolcall/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
 
 ## For AI agents

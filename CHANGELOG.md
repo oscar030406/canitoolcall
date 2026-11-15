@@ -11,6 +11,8 @@ All notable changes to this project are documented here. The format follows
 - `canitoolcall lookup NAME [--engine E] [--matrix PATH_OR_URL] [--json]` answers "does family or model X parse on engine Y?" from a `matrix.json` (stdlib HTTP, with a timeout and a 20 MB cap; unknown names, unreachable sources, unsupported schema versions and malformed files exit 2). Everything read from the file is validated (status values, page paths that stay under the site) and control characters are escaped before printing. The exit code is 0 even when the status is `fail`; scripts should use `--json`. The default source (the published matrix) works once the site is rebuilt by a release containing this change: the live file predates `schema_version` and is rejected with an explanation until then; use `--matrix` with a newer file meanwhile.
 - `matrix.json` now has a versioned schema (`spec/matrix.schema.json`, also published at its `$id` by the site build, `schema_version` "1.0", rules in `spec/README.md`) and an optional `family_info` map of family names and model repos. Existing fields are unchanged.
 
+- `canitoolcall mcp` (issue #29): a stdio MCP server behind the optional extra `canitoolcall[mcp]` (official `mcp` SDK, pinned `==2.3.0`; the base install is unchanged). Tools: `lookup`, `list_families`, `list_engines` (read the `matrix.json` chosen with `--matrix`, never by the caller) and `probe` (sends requests to a caller-supplied endpoint; the API key is read only from an environment variable the operator allowed with `--allow-api-key-env`, default `CANITOOLCALL_API_KEY`, and is never logged or returned).
+
 ## [0.2.0] - 2026-11-15
 
 Fixture spec 0.2, a recovery contract for malformed and truncated output, 31 new fixtures (500 in total) and a
