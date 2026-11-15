@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- The verifiers (`scripts/verify_upstream_pr.py`, `scripts/verify_compiled_pr.py`) now print the `unsupported` count on the `fixtures replayed` line, e.g. `fixtures replayed: 48 (12 unsupported)`, and their JSON reports gain an `unsupported` field.
+
 ## [0.2.0] - 2026-11-15
 
 Fixture spec 0.2, a recovery contract for malformed and truncated output, 31 new fixtures (500 in total) and a
