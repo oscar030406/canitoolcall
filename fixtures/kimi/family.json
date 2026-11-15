@@ -1,7 +1,7 @@
 {
   "slug": "kimi",
   "name": "Kimi (K2.x section tokens, K3 XTML)",
-  "spec_version": "0.1",
+  "spec_version": "0.2",
   "has_reasoning": true,
   "markers": [
     "<|tool_calls_section_begin|>",

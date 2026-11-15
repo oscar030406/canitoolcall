@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "0.1"
+SPEC_VERSION = "0.2"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 Message = dict[str, Any]

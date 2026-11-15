@@ -762,7 +762,7 @@ def base_record(
         "id": f"{SLUG}/{fid}",
         "family": SLUG,
         "models": [model.repo, *model.siblings],
-        "spec_version": "0.1",
+        "spec_version": "0.2",
         "provenance": provenance,
         "tools": offered,
         "raw_output": raw,
@@ -836,7 +836,7 @@ def family_json(renderers: Mapping[str, Renderer]) -> dict[str, Any]:
     return {
         "slug": SLUG,
         "name": "Qwen3 (Hermes-style JSON tool calls)",
-        "spec_version": "0.1",
+        "spec_version": "0.2",
         "has_reasoning": True,
         "markers": [
             "<tool_call>",

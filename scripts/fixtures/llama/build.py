@@ -641,7 +641,7 @@ def family_json(lds: dict[str, Loaded]) -> dict[str, Any]:
     return {
         "slug": SLUG,
         "name": "Llama (3.1, 3.2, 3.3, 4)",
-        "spec_version": "0.1",
+        "spec_version": "0.2",
         "has_reasoning": False,
         "markers": MARKERS,
         "reference_models": refs,

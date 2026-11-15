@@ -28,7 +28,7 @@
       "uniqueItems": true,
       "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$" }
     },
-    "spec_version": { "const": "0.1" },
+    "spec_version": { "type": "string", "pattern": "^0\\.[0-9]+$" },
     "provenance": { "$ref": "#/$defs/provenance" },
     "tools": {
       "description": "Tools offered in the request, in OpenAI Chat Completions function format.",

@@ -1,7 +1,7 @@
 {
   "slug": "deepseek",
   "name": "DeepSeek (V3/R1, V3.1, V3.2 DSML, V4 DSML, V4.1 DSML)",
-  "spec_version": "0.1",
+  "spec_version": "0.2",
   "has_reasoning": true,
   "markers": [
     "<｜tool▁calls▁begin｜>",

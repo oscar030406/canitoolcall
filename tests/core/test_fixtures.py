@@ -81,6 +81,7 @@ def _copy_family(tmp_path: Path, sample_fixtures_dir: Path, mutate) -> Path:  # 
         (lambda r: r.update(models=["Qwen/Qwen3-8B"]), "is not a reference_model"),
         (lambda r: r.update(raw_output=r["raw_output"] + "<|im_end|>"), "before the stop token"),
         (lambda r: r.update(spec_version="1.0"), "spec_version"),
+        (lambda r: r.update(spec_version="0.x"), "spec_version"),
         # A fixture must not point adapters at an arbitrary Hub repo (code execution via remote code).
         (lambda r: r["tokenizer"].update(repo="attacker/looks-like-qwen"), "nor its mirror"),
         (lambda r: r["tokenizer"].update(revision="main"), "does not match"),
@@ -180,3 +181,10 @@ def test_missing_relative_imports(tmp_path: Path) -> None:
     assert missing_relative_imports(tmp_path) == ["encoding/pkg/util.py", "encoding_k3.py", "tool_declaration_ts.py"]
     (tmp_path / "encoding_k3.py").write_text("from __future__ import annotations\n")
     assert missing_relative_imports(tmp_path) == ["encoding/pkg/util.py", "tool_declaration_ts.py"]
+
+
+@pytest.mark.parametrize("version", ["0.1", "0.2", "0.9"])
+def test_validate_accepts_any_minor_of_major_0(tmp_path: Path, sample_fixtures_dir: Path, version: str) -> None:
+    """A minor bump only adds optional fields, so a reader accepts every 0.x fixture (spec/README.md, Versioning)."""
+    root = _copy_family(tmp_path, sample_fixtures_dir, lambda r: r.update(spec_version=version))
+    assert validate([root]) == []

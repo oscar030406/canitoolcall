@@ -99,7 +99,7 @@ def record(
         "id": f"{SLUG}/{name}",
         "family": SLUG,
         "models": models or MODELS,
-        "spec_version": "0.1",
+        "spec_version": "0.2",
         "provenance": provenance,
         "tools": tools,
         "raw_output": raw_output,

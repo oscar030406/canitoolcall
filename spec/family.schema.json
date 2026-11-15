@@ -9,7 +9,7 @@
   "properties": {
     "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]*$" },
     "name": { "type": "string" },
-    "spec_version": { "const": "0.1" },
+    "spec_version": { "type": "string", "pattern": "^0\\.[0-9]+$" },
     "has_reasoning": { "type": "boolean" },
     "markers": {
       "description": "Format markers (special tokens and structural tags) that must never leak into parsed content, reasoning_content or arguments unless the expected result contains them verbatim.",

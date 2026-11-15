@@ -641,7 +641,7 @@ def base_record(
         "id": f"{SLUG}/{fid}",
         "family": SLUG,
         "models": [v.repo, *v.siblings],
-        "spec_version": "0.1",
+        "spec_version": "0.2",
         "provenance": provenance,
         "tools": offered,
         "raw_output": raw,
@@ -717,7 +717,7 @@ def family_json() -> dict[str, Any]:
     return {
         "slug": SLUG,
         "name": "DeepSeek (V3/R1, V3.1, V3.2 DSML, V4 DSML, V4.1 DSML)",
-        "spec_version": "0.1",
+        "spec_version": "0.2",
         "has_reasoning": True,
         "markers": [
             "<｜tool▁calls▁begin｜>",
