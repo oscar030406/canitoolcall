@@ -12,7 +12,6 @@ chosen once at startup with ``--matrix``, never by the caller) and ``probe``
 from __future__ import annotations
 
 import asyncio
-import base64
 import http.client
 import ipaddress
 import os
@@ -20,7 +19,7 @@ import socket
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import quote, quote_plus, urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from canitoolcall.lookup import DEFAULT_MATRIX, DEFAULT_SITE, LookupFailure, clean, load_matrix
 from canitoolcall.lookup import lookup as lookup_matrix
@@ -257,15 +256,9 @@ def _hostport(base_url: str) -> tuple[str, int]:
 
 
 def _key_forms(key: str) -> list[str]:
-    """The key as it could appear in an echoed header or body: raw, ``Bearer`` form, base64 and percent-encoded."""
-    forms: set[str] = set()
-    for text in (key, f"Bearer {key}", f"Basic {key}"):
-        raw = text.encode("utf-8")
-        forms.update((text, quote(text, safe=""), quote_plus(text)))
-        for enc in (base64.b64encode, base64.urlsafe_b64encode):
-            b = enc(raw).decode("ascii")
-            forms.update((b, b.rstrip("=")))
-    return sorted(forms, key=len, reverse=True)  # longest first, so "Bearer <key>" goes before "<key>"
+    from canitoolcall.probe import key_forms
+
+    return key_forms(key)
 
 
 def _redact_tree(value: Any, forms: list[str]) -> Any:

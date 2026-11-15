@@ -755,3 +755,117 @@ def test_matrix_source_secrets_are_scrubbed_from_errors() -> None:
         assert "cannot read" in text
         for secret in ("alice", "hunter2pw", "sekrit-token", "frag-secret"):
             assert secret not in text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/..;x",
+        "/v1;a=b/x",
+        "/v1/%2e%2e",
+        "/v1/%252e%252e",
+        "/v1/%25252e%25252e",
+        "/v1/%2525252e%2525252e",
+        "/v1/%252525252e",
+        "/v1/%2E./x",
+        "/v1/.%2e",
+        "/v1/%2",
+        "/v1/%zz",
+        "/v1/%25",
+        "/v1/a%3bb",
+        "/v1/a:b",
+        "/v1/a%7Cb",
+    ],
+)
+def test_path_segments_are_checked_after_full_decoding(path: str) -> None:
+    from canitoolcall.probe import check_base_url
+
+    with pytest.raises(ValueError):
+        check_base_url("https://api.example.com" + path)
+
+
+@pytest.mark.parametrize("path", ["", "/", "/v1", "/openai/v1/", "/a_b/c-d/e.f~g", "/v%31", "/api%2Dv1"])
+def test_plain_paths_are_still_accepted(path: str) -> None:
+    from canitoolcall.probe import check_base_url
+
+    assert check_base_url("https://api.example.com" + path)
+
+
+def _assert_all_error_by_deadline(data: dict[str, Any], elapsed: float, bound: float) -> None:
+    assert elapsed < bound, elapsed
+    assert data["outcomes"]
+    assert all(o["status"] == "error" for o in data["outcomes"])
+    assert all("overall deadline" in (o.get("detail") or "") for o in data["outcomes"])
+
+
+def test_dripped_response_headers_hit_the_deadline(matrix_path: Path, raw_server: Any) -> None:
+    import time
+
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        h.wfile.write(b"HTTP/1.1 200 OK\r\n")
+        for _ in range(400):  # 20 s of header lines, each gap far shorter than the socket timeout
+            h.wfile.write(b"X-Pad: 1\r\n")
+            h.wfile.flush()
+            time.sleep(0.05)
+        h.close_connection = True
+
+    srv = raw_server(respond)
+    t0 = time.monotonic()
+    args = {"base_url": srv.base_url, "model": "m", "stream": False, "timeout_s": 0.4, "concurrency": 8}
+    err, data, _ = call("probe", args, matrix=matrix_path)
+    assert not err
+    _assert_all_error_by_deadline(data, time.monotonic() - t0, 8)
+
+
+def test_dripped_error_body_hits_the_deadline(matrix_path: Path, raw_server: Any) -> None:
+    import time
+
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        h.send_response(500)
+        h.send_header("Content-Type", "text/plain")
+        h.send_header("Content-Length", "100000")
+        h.end_headers()
+        for _ in range(400):
+            h.wfile.write(b"e")
+            h.wfile.flush()
+            time.sleep(0.05)
+        h.close_connection = True
+
+    srv = raw_server(respond)
+    t0 = time.monotonic()
+    args = {"base_url": srv.base_url, "model": "m", "stream": False, "timeout_s": 0.4, "concurrency": 8}
+    err, data, _ = call("probe", args, matrix=matrix_path)
+    assert not err
+    _assert_all_error_by_deadline(data, time.monotonic() - t0, 8)
+
+
+def test_key_straddling_the_error_boundary_is_redacted(
+    matrix_path: Path, raw_server: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from canitoolcall.mcp_server import MAX_ERROR_DETAIL
+
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        # The key starts 5 bytes before the cut of the body snippet.
+        send_json(h, 500, ("x" * (MAX_ERROR_DETAIL - 5) + SECRET + "tail").encode(), "text/plain")
+
+    srv = raw_server(respond)
+    monkeypatch.setenv("MCP_TEST_KEY", SECRET)
+    policy = ProbePolicy.parse(allow_api_key_envs=[f"MCP_TEST_KEY={srv.base_url}"])
+    args = {"base_url": srv.base_url, "model": "m", "api_key_env": "MCP_TEST_KEY", "stream": False}
+    err, data, text = call("probe", args, matrix=matrix_path, policy=policy)
+    assert not err
+    for o in data["outcomes"]:
+        assert o["detail"].startswith("HTTP 500")
+    blob = json.dumps(data) + text
+    for k in range(4, len(SECRET) + 1):
+        assert SECRET[:k] not in blob
+
+
+def test_clip_redacted_drops_trailing_key_prefixes() -> None:
+    from canitoolcall.probe import _clip_redacted
+
+    # the key crosses the cut: redacted whole, then truncated
+    assert _clip_redacted(b"x" * 195 + SECRET.encode(), 200, SECRET) == "x" * 195 + "***"
+    # a raw cut inside the key leaves a prefix of >= 4 characters: dropped
+    assert _clip_redacted(b"abc " + SECRET[:9].encode(), 200, SECRET) == "abc "
+    assert _clip_redacted(b"abc " + SECRET[:3].encode(), 200, SECRET) == "abc " + SECRET[:3]

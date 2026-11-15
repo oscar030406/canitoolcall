@@ -25,11 +25,15 @@ reports, or echoed in error details.
 
 from __future__ import annotations
 
+import base64
+import contextlib
+import contextvars
 import http.client
 import ipaddress
 import json
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -497,6 +501,12 @@ def check_base_url(url: str) -> str:
 
 
 _CONTROL = re.compile(r"[\x00-\x20\x7f-\x9f]")
+_UNRESERVED = r"A-Za-z0-9._~\-"
+_SAFE_PATH = re.compile(
+    rf"(?:[{_UNRESERVED}/]|%(?:2[de]|3[0-9]|4[1-9a-f]|5[0-9af]|6[1-9a-f]|7[0-9ae]))*", re.IGNORECASE
+)
+"""Path characters allowed in a base URL: unreserved characters, '/', and ``%XX`` escapes that decode to
+unreserved characters only (so '%' itself, i.e. double encoding, is never accepted)."""
 
 
 def check_url_path(url: str) -> None:
@@ -504,21 +514,21 @@ def check_url_path(url: str) -> None:
 
     Refused: control characters or spaces anywhere, backslashes, encoded slashes, backslashes and NULs
     (``%2f``, ``%5c``, ``%00``, any case), and ``.`` / ``..`` segments, raw or percent-encoded (``%2e``),
-    even double-encoded. Raises ``ValueError``.
+    even double-encoded. ``;`` is refused, and so is any character outside ``[A-Za-z0-9._~-/]`` other than
+    ``%XX`` escapes of unreserved characters. Raises ``ValueError``.
     """
     if _CONTROL.search(url) or "\\" in url:
         raise ValueError("base URL must not contain control characters, spaces or backslashes")
     path = urllib.parse.urlsplit(url).path
     if re.search(r"%(?:2f|5c|00)", path, re.IGNORECASE):
         raise ValueError("base URL path must not contain encoded slashes, backslashes or NULs")
+    if ";" in path:
+        raise ValueError("base URL path must not contain ';' (matrix parameters)")
+    if not _SAFE_PATH.fullmatch(path):
+        raise ValueError("base URL path may only contain letters, digits, '._~-/' and %XX escapes of those")
     for segment in path.split("/"):
-        for _ in range(3):
-            if segment in (".", ".."):
-                raise ValueError("base URL path must not contain '.' or '..' segments")
-            decoded = urllib.parse.unquote(segment)
-            if decoded == segment:
-                break
-            segment = decoded
+        if urllib.parse.unquote(segment) in (".", ".."):
+            raise ValueError("base URL path must not contain '.' or '..' segments")
 
 
 def is_loopback(url: str) -> bool:
@@ -576,15 +586,35 @@ def guarded_opener(connect: ConnectFn) -> urllib.request.OpenerDirector:
     ignored (a proxy would connect on the caller's behalf, past the vetting). TLS still verifies the hostname.
     """
 
+    def watched_connect(address: tuple[str, int], timeout: Any = None, source_address: Any = None) -> socket.socket:
+        dog = _WATCHDOG.get()
+        if dog is None:
+            return connect(address, timeout, source_address)
+        # The connect (and the TLS handshake after it) may take at most the time left to the deadline.
+        left = dog.remaining()
+        sock = connect(address, left if timeout is None else min(timeout, left), source_address)
+        dog.register(sock)
+        return sock
+
     class _Http(http.client.HTTPConnection):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self._create_connection = connect
+            self._create_connection = watched_connect
+
+        def connect(self) -> None:
+            super().connect()
+            if (dog := _WATCHDOG.get()) is not None and self.sock is not None:
+                dog.register(self.sock)
 
     class _Https(http.client.HTTPSConnection):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self._create_connection = connect
+            self._create_connection = watched_connect
+
+        def connect(self) -> None:
+            super().connect()
+            if (dog := _WATCHDOG.get()) is not None and self.sock is not None:
+                dog.register(self.sock)  # the TLS socket replaces the raw one
 
     class _HttpHandler(urllib.request.HTTPHandler):
         def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
@@ -611,11 +641,47 @@ _MIN_REDACT = 8
 """Shorter keys are not redacted: replacing a 1-3 character string mangles messages."""
 
 
+def key_forms(key: str) -> list[str]:
+    """The key as it could appear in an echoed header or body: raw, ``Bearer`` form, base64 and percent-encoded."""
+    forms: set[str] = set()
+    for text in (key, f"Bearer {key}", f"Basic {key}"):
+        raw = text.encode("utf-8")
+        forms.update((text, urllib.parse.quote(text, safe=""), urllib.parse.quote_plus(text)))
+        for enc in (base64.b64encode, base64.urlsafe_b64encode):
+            b = enc(raw).decode("ascii")
+            forms.update((b, b.rstrip("=")))
+    return sorted(forms, key=len, reverse=True)  # longest first, so "Bearer <key>" goes before "<key>"
+
+
 def _redact(text: str, secret: str | None) -> str:
     if not secret or len(secret) < _MIN_REDACT:
         return text
-    for form in dict.fromkeys((secret, urllib.parse.quote(secret, safe=""), urllib.parse.quote_plus(secret))):
+    for form in key_forms(secret):
         text = text.replace(form, "***")
+    return text
+
+
+_MIN_PREFIX = 4
+
+
+def _clip_redacted(raw: bytes, n: int, secret: str | None) -> str:
+    """Redact the whole of ``raw`` (which may extend past ``n`` by the longest key form), then keep ``n`` bytes.
+
+    Redacting before truncating means a key straddling byte ``n`` is replaced whole; any trailing run that is
+    still a prefix (>= 4 chars) of a key form is dropped as well.
+    """
+    text = _redact(raw.decode("utf-8", "replace"), secret)
+    text = text.encode("utf-8")[:n].decode("utf-8", "ignore")
+    if secret and len(secret) >= _MIN_REDACT:
+        forms = key_forms(secret)
+        cut = True
+        while cut:
+            cut = False
+            for form in forms:
+                for k in range(min(len(form) - 1, len(text)), _MIN_PREFIX - 1, -1):
+                    if text.endswith(form[:k]):
+                        text, cut = text[:-k], True
+                        break
     return text
 
 
@@ -820,6 +886,50 @@ class _Budget:
         return b"".join(parts)
 
 
+class _Watchdog:
+    """Shuts down the request's sockets when the wall-clock deadline passes, so a blocked connect, header
+    read, body read or error-body read ends at the deadline however slowly the server drips bytes."""
+
+    def __init__(self, seconds: float) -> None:
+        self.deadline = time.monotonic() + seconds
+        self.fired = False
+        self._socks: list[socket.socket] = []
+        self._lock = threading.Lock()
+        self._timer = threading.Timer(seconds, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def remaining(self) -> float:
+        if self.fired:
+            raise TimeoutError("request exceeded its overall deadline")
+        return max(self.deadline - time.monotonic(), 0.001)
+
+    def register(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._socks.append(sock)
+            fired = self.fired
+        if fired:
+            self._kill(sock)
+
+    @staticmethod
+    def _kill(sock: socket.socket) -> None:
+        with contextlib.suppress(OSError, ValueError):
+            sock.shutdown(socket.SHUT_RDWR)
+
+    def _fire(self) -> None:
+        with self._lock:
+            self.fired = True
+            socks = list(self._socks)
+        for sock in socks:
+            self._kill(sock)
+
+    def cancel(self) -> None:
+        self._timer.cancel()
+
+
+_WATCHDOG: contextvars.ContextVar[_Watchdog | None] = contextvars.ContextVar("canitoolcall_watchdog", default=None)
+
+
 def chat_response(
     base_url: str,
     model: str,
@@ -834,8 +944,36 @@ def chat_response(
     """One /chat/completions request with protocol diagnostics.
 
     Raises :class:`ProbeRequestError` on transport/HTTP failures; its message
-    never contains ``api_key``.
+    never contains ``api_key``. With ``limits.deadline_s`` the deadline covers everything from connect
+    to the last byte (error bodies included) for openers made by :func:`guarded_opener`.
     """
+    dog = _Watchdog(limits.deadline_s) if limits and limits.deadline_s and opener is not None else None
+    token = _WATCHDOG.set(dog)
+    try:
+        out = _chat_response(base_url, model, scenario, stream, api_key, timeout_s, opener, limits)
+    except ProbeRequestError:
+        if dog is not None and dog.fired:
+            raise ProbeRequestError("request exceeded its overall deadline") from None
+        raise
+    finally:
+        _WATCHDOG.reset(token)
+        if dog is not None:
+            dog.cancel()
+    if dog is not None and dog.fired:  # sockets were cut mid-body: the response may be partial
+        raise ProbeRequestError("request exceeded its overall deadline")
+    return out
+
+
+def _chat_response(
+    base_url: str,
+    model: str,
+    scenario: Scenario,
+    stream: bool,
+    api_key: str | None,
+    timeout_s: float,
+    opener: urllib.request.OpenerDirector | None,
+    limits: ResponseLimits | None,
+) -> ChatResponse:
     body = json.dumps(scenario.request_body(model, stream=stream), ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "text/event-stream" if stream else "application/json"}
     if api_key:
@@ -861,7 +999,9 @@ def chat_response(
             return out
     except urllib.error.HTTPError as e:
         n = limits.error_bytes if limits else 300
-        snippet = e.read(n).decode("utf-8", "replace") if e.fp is not None else ""
+        extra = max((len(f.encode("utf-8")) for f in key_forms(api_key)), default=0) if api_key else 0
+        raw = e.read(n + extra) if e.fp is not None else b""
+        snippet = _clip_redacted(raw, n, api_key)
         reason = f" {e.reason}" if limits is None else ""
         raise ProbeRequestError(_redact(f"HTTP {e.code}{reason}: {snippet}".strip(), api_key)) from None
     except ProbeRequestError:
