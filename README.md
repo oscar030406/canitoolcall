@@ -38,17 +38,17 @@ Benchmarks such as BFCL measure how good a *model* is at choosing tools. CanIToo
 
 ## What we found
 
-**Every engine we tested has tool-call parser bugs.** Replaying 469 fixtures through the pinned parsers of five engines, the triage found **22 engine bugs**, plus **10 already-reported bugs** that still reproduce. Two examples: multi-token streaming deltas silently drop tool calls or their arguments, and marker text such as `</tool_call>` inside a valid JSON argument breaks parsing in every engine.
+**Every engine we tested has tool-call parser bugs.** Replaying 500 fixtures through the pinned parsers of five engines, the triage found **34 engine bugs**, plus **10 already-reported bugs** that still reproduce. (0.1 counted 22. The engine pins are unchanged; the new findings come from the [recovery contract](docs/formats/recovery.md) and its truncation fixtures. A finding is one root cause, often across many fixtures.) Two examples: multi-token streaming deltas silently drop tool calls or their arguments, and marker text such as `</tool_call>` inside a valid JSON argument breaks parsing in every engine.
 
 | Engine | Version | Fixtures it supports | Pass | Soft pass | Fail | Engine bugs found | Known upstream, still reproducing |
 |---|---|---:|---:|---:|---:|---:|---:|
-| vLLM | 0.30.0 | 469 | 268 | 86 | 115 | 7 | 6 |
-| SGLang | 0.5.20 | 448 | 189 | 62 | 197 | 8 | 0 |
-| llama.cpp | `a25c9865` | 438 | 278 | 46 | 114 | 4 | 1 |
-| Ollama | `7af39318` | 261 | 224 | 10 | 27 | 2 | 3 |
-| HF transformers | 5.17.0 | 48 | 33 | 7 | 8 | 1 | 0 |
+| vLLM | 0.30.0 | 498 | 270 | 93 | 135 | 10 | 6 |
+| SGLang | 0.5.20 | 476 | 200 | 70 | 206 | 11 | 0 |
+| llama.cpp | `a25c9865` | 464 | 287 | 53 | 124 | 6 | 1 |
+| Ollama | `7af39318` | 273 | 234 | 13 | 26 | 4 | 3 |
+| HF transformers | 5.17.0 | 51 | 34 | 7 | 10 | 3 | 0 |
 
-Engines support different subsets of the fixtures, so these numbers are **not a ranking**. Some fails come from a deliberate policy (for example, output cut off by `max_tokens`), not from a mis-parse; [`triage.jsonl`](results/2026-09-25/triage.jsonl) classifies every failing case and gives a repro command for each. The results are identical on macOS arm64 (the committed [snapshot](results/2026-09-25/)) and on Linux x86_64 (the nightly), except one Ollama integer-overflow value that depends on the CPU.
+Engines support different subsets of the fixtures, so these numbers are **not a ranking**. Some fails come from a deliberate policy (for example, output cut off by `max_tokens`), not from a mis-parse; [`triage.jsonl`](results/2026-11-15/triage.jsonl) classifies every failing case and gives a repro command for each. These numbers are from the committed [2026-11-15 snapshot](results/2026-11-15/) (the nightly, on Linux x86_64). The [2026-09-25 snapshot](results/2026-09-25/) on macOS arm64 matched Linux except one Ollama integer-overflow value that depends on the CPU.
 
 ### Reported upstream
 
@@ -75,7 +75,7 @@ flowchart TB
     T["Official chat-template<br/>renders"] --> F
     E["Engine test-suite<br/>cases"] --> F
     B["Public bug<br/>reports"] --> F
-    F["Fixture (469 total, each with provenance)<br/>raw output · token ids · tools · expected parse"]
+    F["Fixture (500 total, each with provenance)<br/>raw output · token ids · tools · expected parse"]
     F --> N["Parse once,<br/>non-streaming"]
     F --> K["Stream it, split 8 ways<br/>one · special · token · 5 seeded random"]
     N --> P["Each engine's own parser code<br/>vLLM · SGLang · llama.cpp · Ollama · transformers<br/>pinned versions · offline · no GPU · no weights"]

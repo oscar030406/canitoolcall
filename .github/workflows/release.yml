@@ -59,7 +59,7 @@ jobs:
           /tmp/smoke/bin/canitoolcall --version
           /tmp/smoke/bin/canitoolcall validate
           /tmp/smoke/bin/canitoolcall engines
-          /tmp/smoke/bin/canitoolcall matrix --results results/2026-09-25 --out /tmp/smoke-site
+          /tmp/smoke/bin/canitoolcall matrix --results results/2026-11-15 --out /tmp/smoke-site
           test -f /tmp/smoke-site/index.html
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
