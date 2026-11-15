@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `canitoolcall matrix --site-url URL`: canonical and Open Graph links (with a 1200×630 preview image) on every page and a `sitemap.xml`. Without the flag the site stays location-independent. The nightly build passes the Pages URL.
+
+### Changed
+
+- Matrix site: every page has a meta description and preview tags, the index page title names what the site is, and the index says it is not a ranking (unsupported cells and policy fails).
+- README: the hero image is the 2026-11-15 matrix, and there are lines on who the project is for and what it does not cover yet.
+
 ## [0.2.0] - 2026-11-15
 
 Fixture spec 0.2, a recovery contract for malformed and truncated output, 31 new fixtures (500 in total) and a
