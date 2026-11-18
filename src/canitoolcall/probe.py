@@ -40,7 +40,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -851,6 +851,17 @@ class ResponseLimits:
     """Wall-clock budget for the whole request, however slowly the server drips bytes."""
     error_bytes: int = 300
     """Bytes of an HTTP error body kept in the error message."""
+    ends_at: float | None = None
+    """``time.monotonic()`` time after which no request may still run (an overall cap on a whole probe)."""
+
+    def for_request(self) -> ResponseLimits:
+        """These limits for a request starting now: ``deadline_s`` shortened to the time left before ``ends_at``."""
+        if self.ends_at is None:
+            return self
+        left = self.ends_at - time.monotonic()
+        if left <= 0:
+            raise ProbeRequestError("probe exceeded its overall time limit")
+        return replace(self, deadline_s=left if self.deadline_s is None else min(self.deadline_s, left), ends_at=None)
 
 
 class _Budget:
@@ -947,6 +958,7 @@ def chat_response(
     never contains ``api_key``. With ``limits.deadline_s`` the deadline covers everything from connect
     to the last byte (error bodies included) for openers made by :func:`guarded_opener`.
     """
+    limits = limits.for_request() if limits else None
     dog = _Watchdog(limits.deadline_s) if limits and limits.deadline_s and opener is not None else None
     token = _WATCHDOG.set(dog)
     try:

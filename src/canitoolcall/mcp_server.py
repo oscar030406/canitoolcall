@@ -16,6 +16,7 @@ import http.client
 import ipaddress
 import os
 import socket
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,6 +32,10 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_ERROR_DETAIL = 200
 """Bytes of an HTTP error body (or other error detail) returned to the caller."""
 MIN_KEY_LEN = 8
+MAX_PROBE_S = 300.0
+"""Wall-clock cap on one probe call: requests still running are cut off and the rest are not sent."""
+MAX_PARALLEL_PROBES = 2
+"""Probe calls that may run at once; a call beyond this is refused, not queued."""
 
 MCP_MISSING_HINT = "the MCP server needs the optional extra: pip install 'canitoolcall[mcp]'"
 
@@ -190,7 +195,7 @@ class ProbePolicy:
     @classmethod
     def parse(cls, allow_base_urls: Iterable[str] = (), allow_api_key_envs: Iterable[str] = ()) -> ProbePolicy:
         """Build from ``--allow-base-url URL`` and ``--allow-api-key-env VAR=URL`` values; ``ValueError`` if bad."""
-        from canitoolcall.probe import check_base_url
+        from canitoolcall.probe import check_base_url, insecure_key_transport
 
         urls = tuple(check_base_url(u) for u in allow_base_urls)
         bindings: dict[str, str] = {}
@@ -202,6 +207,10 @@ class ProbePolicy:
             if var in bindings:
                 raise ValueError(f"--allow-api-key-env {var} given twice")
             bindings[var] = check_base_url(url)
+            if insecure_key_transport(url):
+                raise ValueError(
+                    f"--allow-api-key-env {var}: a key is never sent over plain http to a non-loopback host; use https"
+                )
         return cls(urls, bindings)
 
     def target_allowed(self, base_url: str) -> bool:
@@ -333,7 +342,8 @@ def tool_probe(
 
     The key (raw, ``Bearer`` form, base64 and percent-encoded) is removed from every string of the returned
     report, and keys shorter than 8 characters are never sent. Responses are capped at 8 MB and
-    ``2 * timeout_s`` seconds each; error details are cut to status plus 200 bytes.
+    ``2 * timeout_s`` seconds each, the whole call at ``MAX_PROBE_S``; error details are cut to status plus
+    200 bytes.
     """
     from canitoolcall.probe import (
         ProbeRequestError,
@@ -380,7 +390,12 @@ def tool_probe(
             timeout_s=timeout_s,
             concurrency=concurrency,
             opener=guarded_opener(connect),
-            limits=ResponseLimits(max_bytes=MAX_RESPONSE_BYTES, deadline_s=2 * timeout_s, error_bytes=MAX_ERROR_DETAIL),
+            limits=ResponseLimits(
+                max_bytes=MAX_RESPONSE_BYTES,
+                deadline_s=2 * timeout_s,
+                error_bytes=MAX_ERROR_DETAIL,
+                ends_at=time.monotonic() + MAX_PROBE_S,
+            ),
         )
     except (ProbeRequestError, ValueError, http.client.HTTPException):
         raise ValueError("probe failed") from None
@@ -425,6 +440,7 @@ def build_server(matrix: str | None = None, policy: ProbePolicy | None = None) -
         except ValueError as e:
             raise ToolError(str(e)) from None
 
+    probe_slots = asyncio.Semaphore(MAX_PARALLEL_PROBES)
     read_only = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 
     @server.tool(annotations=read_only)
@@ -461,16 +477,19 @@ def build_server(matrix: str | None = None, policy: ProbePolicy | None = None) -
         environment variable the operator bound to exactly this `base_url`; it is sent only as the
         Authorization header to it, never logged or returned. Omit it for no key. Returns
         per-scenario outcomes."""
-        return await run(
-            tool_probe,
-            base_url,
-            model,
-            api_key_env,
-            stream,
-            timeout_s,
-            concurrency,
-            policy=probe_policy,
-        )
+        if probe_slots.locked():
+            raise ToolError(f"{MAX_PARALLEL_PROBES} probes are already running; try again when one finishes")
+        async with probe_slots:
+            return await run(
+                tool_probe,
+                base_url,
+                model,
+                api_key_env,
+                stream,
+                timeout_s,
+                concurrency,
+                policy=probe_policy,
+            )
 
     return server
 

@@ -229,10 +229,17 @@ def test_probe_refuses_non_loopback_targets_without_resolving(
 
 def test_probe_refuses_key_over_plain_http_to_remote_host(matrix_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCP_TEST_KEY", SECRET)
-    policy = ProbePolicy.parse(allow_api_key_envs=["MCP_TEST_KEY=http://models.example:8000/v1"])
+    policy = ProbePolicy(key_bindings={"MCP_TEST_KEY": "http://models.example:8000/v1"})  # parse() refuses this
     args = {"base_url": "http://models.example:8000/v1", "model": "m", "api_key_env": "MCP_TEST_KEY"}
     err, _, text = call("probe", args, matrix=matrix_path, policy=policy)
     assert err and "plain http" in text and SECRET not in text
+
+
+def test_policy_parse_rejects_a_key_bound_to_plain_http_remote_host() -> None:
+    with pytest.raises(ValueError, match="plain http"):
+        ProbePolicy.parse(allow_api_key_envs=["MCP_TEST_KEY=http://models.example:8000/v1"])
+    ProbePolicy.parse(allow_api_key_envs=["A=http://127.0.0.1:8000/v1", "B=https://models.example/v1"])
+    ProbePolicy.parse(allow_base_urls=["http://models.example:8000/v1"])  # no key, so plain http is fine
 
 
 @pytest.fixture
@@ -905,3 +912,56 @@ def test_drop_key_tail_leaves_ordinary_text_alone() -> None:
     assert _drop_key_tail("ends with sk-S", forms) == "ends with ***"
     assert _drop_key_tail("auth: Bearer sk-Sni", forms) == "auth: ***"
     assert _drop_key_tail("ends with sk-", forms) == "ends with sk-"
+
+
+def test_a_probe_call_has_an_overall_time_cap(
+    matrix_path: Path, raw_server: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    import canitoolcall.mcp_server as ms
+
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        time.sleep(3)  # each request is well inside its own 2 x timeout_s deadline
+        send_json(h, 200, completion("late"))
+
+    assert 60 <= ms.MAX_PROBE_S <= 600
+    monkeypatch.setattr(ms, "MAX_PROBE_S", 1.0)
+    srv = raw_server(respond)
+    t0 = time.monotonic()
+    args = {"base_url": srv.base_url, "model": "m", "stream": False, "timeout_s": 5, "concurrency": 1}
+    err, data, _ = call("probe", args, matrix=matrix_path)
+    assert time.monotonic() - t0 < 6  # 9 requests x 3 s without the cap
+    assert not err and data["ok"] is False
+    assert all(o["status"] == "error" for o in data["outcomes"])
+    assert len(srv.requests) == 1  # nothing new is started once the cap has passed
+
+
+def test_concurrent_probe_calls_are_bounded(matrix_path: Path, raw_server: Any) -> None:
+    import time
+
+    from canitoolcall.mcp_server import MAX_PARALLEL_PROBES
+
+    def respond(h: Any, headers: dict[str, str]) -> None:
+        time.sleep(1)
+        send_json(h, 200, completion("ok"))
+
+    srv = raw_server(respond)
+    args = {"base_url": srv.base_url, "model": "m", "stream": False, "timeout_s": 5, "concurrency": 8}
+    results: list[tuple[bool, str]] = []
+
+    async def go() -> None:
+        async with Client(build_server(str(matrix_path))) as client:
+
+            async def one() -> None:
+                r = await client.call_tool("probe", args)
+                results.append((bool(r.is_error), " ".join(getattr(c, "text", "") for c in r.content)))
+
+            async with anyio.create_task_group() as tg:
+                for _ in range(MAX_PARALLEL_PROBES + 1):
+                    tg.start_soon(one)
+
+    anyio.run(go)
+    refused = [text for is_err, text in results if is_err]
+    assert len(results) == MAX_PARALLEL_PROBES + 1
+    assert len(refused) == 1 and "already running" in refused[0]
