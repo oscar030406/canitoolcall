@@ -1,8 +1,9 @@
-"""Command-line interface: ``canitoolcall {run,probe,matrix,validate,engines}``.
+"""Command-line interface: ``canitoolcall {run,probe,matrix,lookup,validate,engines}``.
 
 * ``run --engine E``        offline suite: replay fixtures through engine E's parsers
 * ``probe --base-url --model``  live check of an OpenAI-compatible endpoint
 * ``matrix``               build the static matrix site from ``results/*.json``
+* ``lookup NAME``          does family or model NAME parse on an engine? (reads matrix.json)
 * ``validate [PATH...]``   validate fixtures and family.json against the spec
 * ``engines``              list known engines and the interpreter each would use
 
@@ -123,6 +124,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help="also write the report as JSON ('-' writes JSON to stdout and the table to stderr)",
+    )
+
+    lk = sub.add_parser("lookup", help="does family X parse on engine Y? (reads the published matrix.json)")
+    lk.add_argument("name", help="family slug, family name or model name (e.g. qwen3-hermes, Qwen/Qwen3.5-9B)")
+    lk.add_argument("--engine", default=None, help="only this engine (vllm, sglang, ...)")
+    lk.add_argument(
+        "--matrix",
+        default=None,
+        metavar="PATH_OR_URL",
+        help="matrix.json to read (default: the published https://redd34.github.io/canitoolcall/matrix.json)",
+    )
+    lk.add_argument(
+        "--json",
+        action="store_true",
+        help="print the answer as JSON. The exit code is 0 whenever the lookup works, even if the status is "
+        "fail: scripts should read the status from this output",
     )
 
     m = sub.add_parser("matrix", help="build the static matrix site from results files")
@@ -290,6 +307,20 @@ def cmd_matrix(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_lookup(args: argparse.Namespace) -> int:
+    from canitoolcall.lookup import DEFAULT_MATRIX, LookupFailure, format_table, load_matrix, lookup, page_base
+
+    source = args.matrix or DEFAULT_MATRIX
+    try:
+        data = load_matrix(source)  # rejects a malformed URL before page_base sees it
+        result = lookup(data, args.name, args.engine, page_base(source))
+    except LookupFailure as e:
+        print(f"canitoolcall lookup: {e}", file=sys.stderr)
+        return EXIT_ERROR
+    print(json.dumps(result, indent=2) if args.json else format_table(result))
+    return EXIT_OK
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     from canitoolcall.fixtures import iter_fixture_files, validate
 
@@ -323,6 +354,7 @@ COMMANDS = {
     "run": cmd_run,
     "probe": cmd_probe,
     "matrix": cmd_matrix,
+    "lookup": cmd_lookup,
     "validate": cmd_validate,
     "engines": cmd_engines,
 }
