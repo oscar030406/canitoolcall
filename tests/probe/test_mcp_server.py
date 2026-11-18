@@ -113,6 +113,20 @@ def test_lookup_matches_the_cli_answer(matrix_path: Path) -> None:
     assert not err and [c["status"] for c in data["cells"]] == ["fail", "pass"]  # sglang, vllm
 
 
+def test_lookup_reports_per_model_results(tmp_path: Path) -> None:
+    matrix = json.loads(json.dumps(MATRIX))
+    matrix["cells"][0]["models"] = {"acme/Alpha-7B": {"status": "fail", "pass_rate": 0.0, "counts": {"fail": 1}}}
+    p = tmp_path / "matrix.json"
+    p.write_text(json.dumps(matrix), encoding="utf-8")
+
+    err, data, _ = call("lookup", {"name": "acme/alpha-7b"}, matrix=p)
+    assert not err and data["model"] == "acme/Alpha-7B"
+    assert [(c["engine"], c["scope"], c["status"]) for c in data["cells"]] == [
+        ("sglang", "family", "fail"),
+        ("vllm", "model", "fail"),
+    ]
+
+
 def test_lookup_errors_are_tool_errors(matrix_path: Path) -> None:
     err, _, text = call("lookup", {"name": "nope"}, matrix=matrix_path)
     assert err and "unknown family or model" in text
