@@ -145,6 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
             "fixtures/, else the corpus bundled with the package)"
         ),
     )
+    m.add_argument(
+        "--site-url",
+        default=None,
+        help="absolute URL the site will be published at; adds canonical and preview links and a sitemap.xml",
+    )
 
     v = sub.add_parser("validate", help="validate fixtures against the spec")
     v.add_argument("paths", nargs="*", type=Path, help="fixture files/dirs (default: the fixtures root)")
@@ -277,7 +282,7 @@ def cmd_matrix(args: argparse.Namespace) -> int:
         print(f"canitoolcall matrix: {no_results_hint(args.results)}", file=sys.stderr)
         return EXIT_ERROR
     try:
-        index = render_site(args.results, args.out, args.templates, fixtures_dir=args.fixtures)
+        index = render_site(args.results, args.out, args.templates, fixtures_dir=args.fixtures, site_url=args.site_url)
     except (FileNotFoundError, ValueError) as e:
         print(f"canitoolcall matrix: {e}", file=sys.stderr)
         return EXIT_ERROR

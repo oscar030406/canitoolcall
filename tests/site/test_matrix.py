@@ -443,3 +443,51 @@ def test_run_synthetic_strategies_do_not_count(tmp_path: Path) -> None:
     page = render_site(_write(tmp_path, [one_token]), tmp_path / "site")
     cell_page = (page.parent / cell_path("ollama", "7af39318", "qwen3-hermes")).read_text(encoding="utf-8")
     assert "streams one token per event" in cell_page
+
+
+def test_render_site_seo_without_site_url(tmp_path: Path) -> None:
+    out = tmp_path / "site"
+    html = render_site(_write(tmp_path, _sample_runs()), out).read_text(encoding="utf-8")
+    assert '<meta name="description" content="Does your model' in html
+    assert 'property="og:title"' in html
+    assert "This is not a ranking." in html
+    assert "canonical" not in html and "og:url" not in html and "og:image" not in html
+    assert not (out / "sitemap.xml").exists()
+    assert not (out / "robots.txt").exists()
+    assert (out / "assets" / "social.png").is_file()
+
+
+def test_render_site_with_site_url(tmp_path: Path) -> None:
+    out = tmp_path / "site"
+    index = render_site(_write(tmp_path, _sample_runs()), out, site_url="https://example.org/matrix")
+    html = index.read_text(encoding="utf-8")
+    assert '<link rel="canonical" href="https://example.org/matrix/">' in html
+    assert '<meta property="og:image" content="https://example.org/matrix/assets/social.png">' in html
+    assert 'content="summary_large_image"' in html
+    rel = cell_path("vllm", "0.30.0", "qwen3-hermes")
+    cell_html = (out / rel).read_text(encoding="utf-8")
+    assert f'<link rel="canonical" href="https://example.org/matrix/{rel}">' in cell_html
+    assert "How vllm 0.30.0&#39;s own parsers handle" in cell_html
+    sitemap = (out / "sitemap.xml").read_text(encoding="utf-8")
+    assert sitemap.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+    assert "<loc>https://example.org/matrix/</loc>" in sitemap
+    assert f"<loc>https://example.org/matrix/{rel}</loc>" in sitemap
+    assert sitemap.count("<url>") == 1 + len(list((out / "cells").rglob("*.html")))
+
+
+@pytest.mark.parametrize(
+    "bad", ["example.org", "ftp://example.org/", "https://example.org/?x=1", "javascript:alert(1)"]
+)
+def test_render_site_rejects_bad_site_url(tmp_path: Path, bad: str) -> None:
+    with pytest.raises(ValueError, match="site-url"):
+        render_site(_write(tmp_path, _sample_runs()), tmp_path / "site", site_url=bad)
+
+
+def test_cli_matrix_site_url(tmp_path: Path) -> None:
+    results = _write(tmp_path, _sample_runs())
+    out = tmp_path / "site"
+    assert (
+        main(["matrix", "--results", str(results), "--out", str(out), "--site-url", "https://example.org/"]) == EXIT_OK
+    )
+    assert (out / "sitemap.xml").is_file()
+    assert main(["matrix", "--results", str(results), "--out", str(out), "--site-url", "nope"]) == EXIT_ERROR
