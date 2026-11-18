@@ -1,9 +1,10 @@
-"""Command-line interface: ``canitoolcall {run,probe,matrix,lookup,validate,engines}``.
+"""Command-line interface: ``canitoolcall {run,probe,matrix,lookup,mcp,validate,engines}``.
 
 * ``run --engine E``        offline suite: replay fixtures through engine E's parsers
 * ``probe --base-url --model``  live check of an OpenAI-compatible endpoint
 * ``matrix``               build the static matrix site from ``results/*.json``
 * ``lookup NAME``          does family or model NAME parse on an engine? (reads matrix.json)
+* ``mcp``                  stdio MCP server: lookup, list_families, list_engines, probe (needs canitoolcall[mcp])
 * ``validate [PATH...]``   validate fixtures and family.json against the spec
 * ``engines``              list known engines and the interpreter each would use
 
@@ -140,6 +141,35 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the answer as JSON. The exit code is 0 whenever the lookup works, even if the status is "
         "fail: scripts should read the status from this output",
+    )
+
+    mc = sub.add_parser("mcp", help="run a stdio MCP server (needs the 'mcp' extra: pip install canitoolcall[mcp])")
+    mc.add_argument(
+        "--matrix",
+        default=None,
+        metavar="PATH_OR_URL",
+        help="matrix.json the lookup tools read (default: the published one); callers cannot change it",
+    )
+    mc.add_argument(
+        "--allow-base-url",
+        action="append",
+        default=[],
+        metavar="URL",
+        help=(
+            "base URL (scheme, host, port, path prefix) the probe tool may target besides loopback "
+            "(repeatable). By default only loopback is reachable; private/link-local/metadata addresses "
+            "are refused after DNS resolution unless the URL is an allowlisted IP literal"
+        ),
+    )
+    mc.add_argument(
+        "--allow-api-key-env",
+        action="append",
+        default=[],
+        metavar="VAR=URL",
+        help=(
+            "environment variable whose value the probe tool may send as an API key, ONLY to this exact base URL "
+            "(repeatable; the URL is also allowed as a target). No key is ever sent by default"
+        ),
     )
 
     m = sub.add_parser("matrix", help="build the static matrix site from results files")
@@ -321,6 +351,26 @@ def cmd_lookup(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    import importlib.util
+
+    if importlib.util.find_spec("mcp") is None:
+        print(
+            "canitoolcall mcp: the MCP server needs the optional extra: pip install 'canitoolcall[mcp]'",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    from canitoolcall.mcp_server import ProbePolicy, serve
+
+    try:
+        policy = ProbePolicy.parse(args.allow_base_url, args.allow_api_key_env)
+    except ValueError as e:
+        print(f"canitoolcall mcp: {e}", file=sys.stderr)
+        return EXIT_ERROR
+    serve(args.matrix, policy)
+    return EXIT_OK
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     from canitoolcall.fixtures import iter_fixture_files, validate
 
@@ -355,6 +405,7 @@ COMMANDS = {
     "probe": cmd_probe,
     "matrix": cmd_matrix,
     "lookup": cmd_lookup,
+    "mcp": cmd_mcp,
     "validate": cmd_validate,
     "engines": cmd_engines,
 }
