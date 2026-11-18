@@ -203,6 +203,6 @@ Strict equality gives `pass`. Soft-only equality gives `soft_pass`, which the ma
 | `families` | family slugs |
 | `family_info` | optional `{slug: {name, models}}` (display name, HF repo ids from `family.json` and the fixtures); present when the corpus was available at build time |
 | `engines` | one entry per column: `name`, `version`, `commit`, `run_started_at`, `run_finished_at` |
-| `cells` | one per family and engine: `status` (worst over supported cases), `counts` per status, `pass_rate` (strict pass over supported cases, `null` if none), `stress_failures`, per-check `checks`, `run_at`, `page` (site-relative cell page) |
+| `cells` | one per family and engine: `status` (worst over supported cases), `counts` per status, `pass_rate` (strict pass over supported cases, `null` if none), `stress_failures`, per-check `checks`, `run_at` (ISO 8601 time the run finished; pick an engine's newest version by this, not by the version string, which may be a commit hash), `page` (site-relative cell page), and optional `models`: `{repo: {status, counts, pass_rate}}` over the cases whose fixture lists that repo in its `models` (a fixture listing several models counts for each; present only when every case's fixture was in the corpus at build time) |
 
 Versioning rule: adding optional fields is a minor bump; removing or renaming a field, or changing its meaning, is a major bump. Readers must ignore unknown fields and must reject an unknown major version.

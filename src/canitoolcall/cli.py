@@ -303,15 +303,12 @@ def cmd_matrix(args: argparse.Namespace) -> int:
 
 
 def cmd_lookup(args: argparse.Namespace) -> int:
-    from urllib.parse import urljoin
-
-    from canitoolcall.lookup import DEFAULT_MATRIX, LookupFailure, format_table, load_matrix, lookup
+    from canitoolcall.lookup import DEFAULT_MATRIX, LookupFailure, format_table, load_matrix, lookup, page_base
 
     source = args.matrix or DEFAULT_MATRIX
-    # Page paths are relative to the matrix's own location: its URL's directory, or nothing for a file.
-    base = urljoin(source, ".") if source.startswith(("http://", "https://")) else ""
     try:
-        result = lookup(load_matrix(source), args.name, args.engine, base)
+        data = load_matrix(source)  # rejects a malformed URL before page_base sees it
+        result = lookup(data, args.name, args.engine, page_base(source))
     except LookupFailure as e:
         print(f"canitoolcall lookup: {e}", file=sys.stderr)
         return EXIT_ERROR
