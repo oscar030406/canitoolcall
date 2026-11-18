@@ -14,6 +14,7 @@ All notable changes to this project are documented here. The format follows
 
 - Matrix site: every page has a meta description and preview tags, the index page title names what the site is, and the index says it is not a ranking (unsupported cells and policy fails).
 - README: the hero image is the 2026-11-15 matrix, and there are lines on who the project is for and what it does not cover yet.
+- The verifiers (`scripts/verify_upstream_pr.py`, `scripts/verify_compiled_pr.py`) now print the `unsupported` count on the `fixtures replayed` line, e.g. `fixtures replayed: 48 (N unsupported)`, and their JSON reports gain an `unsupported` field.
 
 ## [0.2.0] - 2026-11-15
 
